@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "claude-sonnet-5",
+  "effortLevel": "high",
+  "disableClaudeAiConnectors": true,
+  "env": {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git stash:*)",
+      "Bash(git worktree list:*)",
+      "Bash(ls:*)",
+      "Bash(tree:*)",
+      "Bash(wc:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)"@@ALLOW@@
+    ],
+    "deny": [
+      "Bash(apt:*)",
+      "Bash(apt-get:*)",
+      "Bash(sudo:*)",
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(git worktree add:*)",
+      "Bash(git worktree remove:*)",
+      "Bash(git push --force:*)",
+      "Bash(git filter-branch:*)",
+      "Read(./.bare/**)",
+      "Edit(./.bare/**)",
+      "Write(./.bare/**)",
+      "Edit(./shared/**)",
+      "Write(./shared/**)"
+    ]
+  }
+}
