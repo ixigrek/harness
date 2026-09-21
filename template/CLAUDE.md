@@ -4,7 +4,7 @@ You run inside a Docker Sandbox (sbx). The workspace is `worktree/`, mounted fro
 
 ## Layout
 - `.bare/` is the git object store. Never edit anything under it.
-- Each branch is a directory: `main/`, `<branch>/`. Work inside ONE of them per task. Do not create worktrees; the user does (`harness.sh add`).
+- Each branch is a directory: `main/`, `<branch>/`. Work inside ONE of them per task. Do not create worktrees; the user does (`harness add`).
 - `shared/` holds redacted copies of real datasets. Treat them as representative, not real. The originals are outside the sandbox: never ask for them, never try to reconstruct them.
 - `.claude/` holds settings shared by all worktrees.
 

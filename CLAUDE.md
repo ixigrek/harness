@@ -1,0 +1,109 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this repo is
+
+`harness` is the tooling that runs Claude Code inside a Docker Sandbox (`sbx`) with no access to real
+data and only read-only infra credentials. It is self-hosted: this very checkout lives in a harness
+layout, and the `../CLAUDE.md` you also see is the copy of `template/CLAUDE.md` that `harness new`
+installed for this project. Those root rules (git, network, token hygiene) apply here; this file only
+adds what is specific to developing the harness itself.
+
+Everything is bash and a single Python script. There is no build, no test suite, no linter.
+`ROADMAP.md` is the source of truth for what is done, in progress, and decided; update it when a step
+changes status.
+
+## Commands
+
+Runnable from inside the sandbox:
+
+```bash
+bash -n harness                       # syntax check (no shellcheck in the image)
+./check-versions.py                   # compare Dockerfile *_VERSION ARGs with GitHub latest; exit 1 = something to bump
+```
+
+Host only (need `sbx`, `docker buildx`, a registry login; none of that exists in the sandbox):
+
+```bash
+HARNESS_IMAGE_REPO=docker.io/<user>/harness ./build.sh [tag]   # builds dev + infra targets, pushes, writes image/TAG
+PUSH=0 ./build.sh                                              # local --load instead of --push
+harness new [--infra] <name> [remote-url]                      # lay out <PROJECTS_ROOT>/<name>/
+harness add <branch> [dir]                                     # new worktree under worktree/
+harness repair                                                 # re-relativise worktree paths
+harness policy                                                 # sbx policy allow for Go + Claude hosts
+harness run [--infra] [--fresh]                                # create/reattach sandbox, workspace = worktree/
+HARNESS_PLAIN=1 harness run                                    # default sbx image, no kit
+```
+
+When you change `harness`, `build.sh`, the Dockerfile or the kits, you cannot exercise them here.
+Say what the user should run on the host to validate.
+
+## Architecture
+
+### Host layout produced by `harness new`
+
+```
+<PROJECTS_ROOT>/<name>/
+  data/                 real data, chmod 700, NEVER mounted
+  data/agent/           (--infra) the one subfolder mounted in the VM, :ro, same absolute path
+    .env, .env.session, kubeconfig
+  worktree/             the sbx workspace, mounted rw
+    .bare/              bare repo; worktree/.git is "gitdir: ./.bare"
+    main/, <branch>/    git worktrees, each with .claude -> ../.claude
+    .claude/settings.json
+    CLAUDE.md           template/CLAUDE.md (+ template/CLAUDE.infra.md with --infra)
+    shared/             redacted datasets, produced on the host
+    .harness/kit/spec.yaml   (--infra) per-project mixin kit, git-excluded
+```
+
+Why a bare repo plus `worktree.useRelativePaths` (git >= 2.48): the workspace is mounted at a
+different path inside the VM, and absolute worktree pointers would break. `harness repair` re-applies
+this. Git identity is set at repo level because the VM does not inherit `~/.gitconfig`.
+
+### Image and kits
+
+- `image/Dockerfile` has two targets: `dev` (base `docker/sandbox-templates:claude-code` + pinned
+  Go, Bun) and `infra` (dev + kubectl, helm, cilium, hubble, argocd, flux, terraform, tofu, aws,
+  gcloud, az, hcloud, scw, ovhcloud). All binaries land in `/usr/local/bin`; versions are `ARG`s and
+  a renamed upstream asset must fail the build. `az` is installed through `uv` with a managed
+  Python 3.12 because the base image ships a Python that azure-cli does not support yet.
+- `build.sh` tags `<repo>:<target>-<tag>` and writes the tag to `image/TAG`; `harness run` reads that
+  file to pick the image. `check-versions.py` reads the same `ARG`s from the Dockerfile.
+- `kits/harness-dev` and `kits/harness-infra` are `mixin` kits stacked on `--template`: network
+  allow-list plus telemetry-off env. `template/project-kit/spec.yaml` becomes
+  `worktree/.harness/kit/spec.yaml` with the k8s API host filled in from the kubeconfig; `harness run`
+  refuses to start while it still contains `CHANGEME` or omits that host.
+- Image and kits are frozen when the sandbox is created. `--fresh` removes and recreates it.
+
+### Credential flow (step 3 of the roadmap)
+
+The security boundary is the credential, not Claude Code: every identity handed to the agent is
+read-only (k8s `view` SA, `Reader` SP, read tokens). The `deny` list in `settings.json` is ergonomics
+and can be bypassed from bash.
+
+`harness run` does create, then `post_create`, then attach. `post_create` runs inside the VM and
+installs a loader that exports `AGENT_DIR` and sources `data/agent/.env` and `.env.session` into
+`/etc/sandbox-persistent.sh`, `~/.profile` and `~/.bashrc`, and symlinks the kubeconfig to
+`~/.kube/config`. `.env` is POSIX sh (dash), long-lived, readable in clear in the VM; `.env.session`
+is for 1h tokens and will be generated by a future `harness env`. Simple bearer APIs should use
+`sbx secret` proxy injection instead so the VM never sees the key. An optional
+`worktree/.harness/post-create.sh` runs after the loader.
+
+`k8s/claude-ro.yaml` is a reference RBAC manifest for such a read-only identity, not something the
+harness applies.
+
+### Templates
+
+`template/` is copied verbatim by `harness new`; editing it changes nothing for existing projects.
+`template/settings.json` and the `.claude/settings.json` of this checkout are currently identical:
+keep them in sync when you change one.
+
+## Conventions specific to this repo
+
+- Keep `harness` a single file, `set -euo pipefail`, `die`/`log` helpers, one `cmd_*` per subcommand,
+  usage text in the header comment (the fallback `case` prints lines 2-10 of the file, so keep the
+  usage block there).
+- Pin versions; never install anything at run time. Weekly image rebuild is the update path.
+- Comments and docs in English (fewer tokens). Shell must stay portable to the VM's `sh` where it is
+  executed there (the loader in `post_create`).
