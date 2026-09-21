@@ -55,7 +55,7 @@ top of it. Everything else is parked, not planned.
 - [x] Loader sourced by the agent process (verified 2026-09-21 in `talos`: `$AGENT_DIR` set)
 - [x] `KUBECONFIG` empty in the same check: the sandbox had been created without `--infra`. `run` now infers the flavor from `.harness/kit/spec.yaml`; `--dev`/`--infra` override
 - [x] The LAN IP still had to be accepted in the TUI on a `--fresh` run (2026-09-21): `talos` has no `.harness/kit/spec.yaml` (laid out before the kit existed), its 27 allows come from `harness-infra` alone. Fix: `harness kit` (2026-09-21) writes the kit for an existing project
-- [ ] In `talos`: `harness kit`, then `harness run --fresh`, then check that the API server is no longer asked for in the TUI
+- [x] In `talos`: `harness kit`, then `harness run --fresh`; the TUI no longer asks for the API server (2026-09-21)
 
 ### In scope [ ]
 | Provider | Identity | Delivery | Status |
@@ -93,8 +93,12 @@ Only existed for AWS/GCP 1h session tokens, which are parked. The mechanism (`.e
 
 Order: the cheap win first, the measurement second, Headroom last and only if still needed.
 
-- [ ] MCP inventory: list what `mcp-gateway.docker.internal` exposes in a session. Gmail, Google Calendar, Google Drive and Claude Docs are loaded in a harness session and none is needed here. Disable per project with `/mcp`
-- [ ] Baseline: one week of sessions with adapted effort/model (Sonnet for execution, Opus for planning, recaps cut, unused MCPs off)
+- [x] MCP inventory (2026-09-21, from inside a harness session):
+  - `mcp-gateway` (`~/.claude.json`, injected by sbx): 5 meta-tools (`mcp-find`, `mcp-add`, `mcp-exec`, `code-mode`, `mcp-config-set`), catalog empty. Harmless
+  - claude.ai connectors (account-level, not in any local config): Gmail 26 tools, Google Drive 11, Google Calendar 9, Claude Docs 8 + its instructions block. None needed in a sandbox
+  - Fix: `"disableClaudeAiConnectors": true` in `settings.json` (template + `worktree/.claude`). Existing projects: copy `template/settings.json` over their `worktree/.claude/settings.json`
+- [x] Measurement: `harness cost [--days N] [--by session]` (`cost.py` run in the VM via `sbx exec`). Sums per-turn `usage` from `~/.claude/projects/**/*.jsonl` (main sessions and subagents, streamed duplicates deduped by message id), per day and model, with API-equivalent USD. The log volume dies with `sbx rm`: run it before `--fresh`
+- [ ] Baseline: one week of sessions with `settings.json` at `model: claude-sonnet-5`, `effortLevel: high` (Claude Code default is `xhigh`); `/model opus` by hand for planning. Reference point, 2026-09-21 alone in the harness sandbox: 67 turns, 2.6M cache reads, 40k output, ~$7 API-equivalent, 92% of it on Fable
 - [ ] Headroom inside the VM (local proxy to api.anthropic.com through the sbx proxy); check that the path holds with Anthropic credential injection
 - [ ] One week with it, cost comparison
 - [ ] Keep only if the gain is clear; no stacking with rtk/caveman-proxy
@@ -114,8 +118,8 @@ Reminder: Headroom sets `ANTHROPIC_BASE_URL`, so the context is handled as 200k,
 
 ## Order of work (decided 2026-09-21)
 
-1. `talos`: `harness kit` + `harness run --fresh` (minutes, host); also answers the `sbx create` syntax `[?]`
-2. Step 5: MCP inventory, then the baseline week
+1. ~~`talos`: `harness kit` + `harness run --fresh`~~ done 2026-09-21
+2. Step 5: ~~MCP inventory~~, then the baseline week (started 2026-09-21; `harness cost` at the end, before any `--fresh`)
 3. Step 3: ArgoCD read-only identity
 4. Step 5: Headroom trial, if the baseline still hurts
 5. Step 6: README, then migration, then rebuild routine
@@ -124,9 +128,9 @@ Reminder: Headroom sets `ANTHROPIC_BASE_URL`, so the context is handled as 200k,
 
 ## Open points / debt
 
-- [?] Does `sbx create` accept the same syntax as `sbx run` (create/post-create/run has not yet been exercised with `--fresh`)
+- [x] `sbx create` accepts the same syntax as `sbx run` (exercised by `talos --fresh`, 2026-09-21)
 - [?] Private IPs in the kits
 - `downloads.claude.ai` hit at boot despite `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` (probably sbx provisioning the agent). Benign
 - `azcliprod.blob.core.windows.net` blocked (`az` auto-update). Intended
 - The `deny` entries in `settings.json` can be bypassed via bash (demonstrated on `.bare/`). The sandbox and the credentials are what protect, not them
-- `mcp-gateway.docker.internal` heavily used: inventory what the MCP gateway exposes before measuring tokens
+- `mcp-gateway.docker.internal` heavily used: it is Claude Code polling the gateway, which exposes nothing (catalog empty, see Step 5). Benign
