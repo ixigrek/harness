@@ -188,38 +188,43 @@ render_project() {
   } > "$gen"
   splice_markers "$wt/CLAUDE.md" "$gen"
 
-  # --- settings.json
-  local allow="" l
-  for t in $EFFECTIVE; do
-    while IFS= read -r l; do allow+=$',\n      "'"$l"'"'; done < <(frag "$t" allow)
-  done
+  # --- settings.json (generated lines go through files: BSD awk refuses newlines in -v strings)
+  local allow hosts env l h; allow="$(mktemp)"; hosts="$(mktemp)"; env="$(mktemp)"
+  for t in $EFFECTIVE; do frag "$t" allow; done > "$allow"
   mkdir -p "$wt/.claude"
-  awk -v allow="$allow" 'index($0, "@@ALLOW@@") { sub(/@@ALLOW@@/, allow) } 1' \
-    "$TEMPLATE_DIR/settings.json" > "$wt/.claude/settings.json"
+  awk -v f="$allow" '
+    index($0, "@@ALLOW@@") {
+      sub(/@@ALLOW@@/, ""); printf "%s", $0
+      while ((getline l < f) > 0) printf ",\n      \"%s\"", l
+      printf "\n"; next
+    }
+    1' "$TEMPLATE_DIR/settings.json" > "$wt/.claude/settings.json"
   if command -v jq >/dev/null; then jq -e . "$wt/.claude/settings.json" >/dev/null || die "generated settings.json is not valid JSON"; fi
 
   # --- project kit: tool hosts + .harness/hosts + API server, tool env
-  local hosts="" env="" h
-  if [[ " $EFFECTIVE " == *" kubectl "* ]]; then
-    h=CHANGEME.api-server; [[ -f "$root/data/agent/kubeconfig" ]] && h="$(k8s_host "$root/data/agent/kubeconfig")"
-    hosts+=$'      # Cluster API server (from data/agent/kubeconfig)\n      - '"$h"$'\n'
-  fi
+  {
+    if [[ " $EFFECTIVE " == *" kubectl "* ]]; then
+      h=CHANGEME.api-server; [[ -f "$root/data/agent/kubeconfig" ]] && h="$(k8s_host "$root/data/agent/kubeconfig")"
+      printf '      # Cluster API server (from data/agent/kubeconfig)\n      - %s\n' "$h"
+    fi
+    for t in $EFFECTIVE; do
+      while IFS= read -r h; do [[ "$h" == *'*'* ]] && h="\"$h\""; printf '      - %s\n' "$h"; done < <(frag "$t" hosts)
+    done
+    if [[ -f "$wt/.harness/hosts" ]]; then
+      while IFS= read -r h; do [[ "$h" =~ ^[[:space:]]*(#|$) ]] && continue; printf '      - %s\n' "$h"; done < "$wt/.harness/hosts"
+    fi
+  } > "$hosts"
+  [[ -s "$hosts" ]] || printf '      []\n' > "$hosts"
   for t in $EFFECTIVE; do
-    while IFS= read -r h; do [[ "$h" == *'*'* ]] && h="\"$h\""; hosts+="      - $h"$'\n'; done < <(frag "$t" hosts)
-  done
-  if [[ -f "$wt/.harness/hosts" ]]; then
-    while IFS= read -r h; do [[ "$h" =~ ^[[:space:]]*(#|$) ]] && continue; hosts+="      - $h"$'\n'; done < "$wt/.harness/hosts"
-  fi
-  [[ -n "$hosts" ]] || hosts=$'      []\n'
-  for t in $EFFECTIVE; do
-    while IFS= read -r l; do env+="    $l"$'\n'; done < <(frag "$t" env)
-  done
-  [[ -n "$env" ]] && env=$'environment:\n  variables:\n'"$env"
+    while IFS= read -r l; do printf '    %s\n' "$l"; done < <(frag "$t" env)
+  done > "$env"
+  [[ -s "$env" ]] && { printf 'environment:\n  variables:\n' | cat - "$env" > "$env.h" && mv "$env.h" "$env"; }
   mkdir -p "$wt/.harness/kit"
-  awk -v hosts="${hosts%$'\n'}" -v env="${env%$'\n'}" '
-    $0 == "@@HOSTS@@" { print hosts; next }
-    $0 == "@@ENV@@"   { if (env != "") print env; next }
+  awk -v hf="$hosts" -v ef="$env" '
+    $0 == "@@HOSTS@@" { while ((getline l < hf) > 0) print l; next }
+    $0 == "@@ENV@@"   { while ((getline l < ef) > 0) print l; next }
     1' "$TEMPLATE_DIR/project-kit/spec.yaml" > "$wt/.harness/kit/spec.yaml"
+  rm -f "$allow" "$hosts" "$env"
   grep -qxF '.harness' "$wt/.bare/info/exclude" 2>/dev/null || printf '.harness\n' >> "$wt/.bare/info/exclude"
 
   printf '%s\n' "$EFFECTIVE" > "$wt/.harness/tools"
