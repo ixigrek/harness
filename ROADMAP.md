@@ -54,7 +54,8 @@ top of it. Everything else is parked, not planned.
 - [x] `data/agent/.env` (POSIX sh, `$AGENT_DIR`) + `.env.session`; loader written by `post_create` into `/etc/sandbox-persistent.sh`, `~/.profile`, `~/.bashrc`; symlink `~/.kube/config`
 - [x] Loader sourced by the agent process (verified 2026-09-21 in `talos`: `$AGENT_DIR` set)
 - [x] `KUBECONFIG` empty in the same check: the sandbox had been created without `--infra`. `run` now infers the flavor from `.harness/kit/spec.yaml`; `--dev`/`--infra` override
-- [?] The LAN IP still had to be accepted in the TUI on a `--fresh` run (2026-09-21). Either the project kit is absent in `talos` (laid out before the kit existed) or the kit allow does not match. Check `ls worktree/.harness/kit/spec.yaml` in the project, then `sbx policy ls`
+- [x] The LAN IP still had to be accepted in the TUI on a `--fresh` run (2026-09-21): `talos` has no `.harness/kit/spec.yaml` (laid out before the kit existed), its 27 allows come from `harness-infra` alone. Fix: `harness kit` (2026-09-21) writes the kit for an existing project
+- [ ] In `talos`: `harness kit`, then `harness run --fresh`, then check that the API server is no longer asked for in the TUI
 
 ### In scope [ ]
 | Provider | Identity | Delivery | Status |
@@ -113,7 +114,7 @@ Reminder: Headroom sets `ANTHROPIC_BASE_URL`, so the context is handled as 200k,
 
 ## Order of work (decided 2026-09-21)
 
-1. Close the two Kubernetes `[?]` (minutes, host)
+1. `talos`: `harness kit` + `harness run --fresh` (minutes, host); also answers the `sbx create` syntax `[?]`
 2. Step 5: MCP inventory, then the baseline week
 3. Step 3: ArgoCD read-only identity
 4. Step 5: Headroom trial, if the baseline still hurts

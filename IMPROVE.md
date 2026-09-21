@@ -8,6 +8,3 @@ Not planned, not ordered. Promote to `ROADMAP.md` when one gets a slot.
   or a set of kits, not `apt` inside the VM. Could be a third target built from a list, or a
   per-project `.harness/tools` file that `build.sh` reads. Origin: a `--fresh` run on `talos`
   landed on the `dev` image and had no kubectl (2026-09-21).
-- **`harness kit` subcommand.** Write or refresh `worktree/.harness/kit/spec.yaml` for an
-  existing project (today only `harness new --infra` does it), so projects created before the
-  project kit existed get the API server allow-listed without a manual edit.

@@ -4,6 +4,7 @@
 #   harness new [--infra] <name> [url]  creates <PROJECTS_ROOT>/<name>/{data,worktree/{.bare,main,shared,.claude,CLAUDE.md}}
 #                                        --infra: data/agent/ (mounted :ro in the VM), project kit, k8s section in CLAUDE.md
 #   harness add <branch> [dir]        adds a worktree (from anywhere under the project)
+#   harness kit                       writes/refreshes worktree/.harness/kit/spec.yaml (projects created before the kit existed)
 #   harness repair                    resets worktree paths to relative (host <-> VM)
 #   harness policy                    adds the Go pilot's network hosts to the sbx policy
 #   harness run [--infra|--dev] [--fresh]   launches Claude Code in sbx, workspace = worktree/
@@ -158,6 +159,20 @@ cmd_add() {
 }
 
 # Repairs worktree paths (after mounting elsewhere, or a "repair" done by the agent)
+# Project kit for an existing project (created before the kit existed, or kubeconfig changed). Then `harness run --fresh`.
+cmd_kit() {
+  local root wt; root="$(find_root)"; wt="$root/worktree"
+  local spec="$wt/.harness/kit/spec.yaml"
+  [[ -f "$root/data/agent/kubeconfig" ]] || die "no $root/data/agent/kubeconfig (drop the agent kubeconfig there first)"
+  if [[ -f "$spec" ]]; then
+    local old="$spec.bak"; cp "$spec" "$old"; log "existing kit saved as $old (custom hosts must be re-added)"
+  fi
+  mkdir -p "$wt/.harness/kit"
+  write_project_kit "$root"
+  grep -qxF '.harness' "$wt/.bare/info/exclude" 2>/dev/null || printf '.harness\n' >> "$wt/.bare/info/exclude"
+  log "sandbox kits are frozen at creation: run 'harness run --fresh' to apply"
+}
+
 cmd_repair() {
   local wt; wt="$(find_root)/worktree"
   git -C "$wt/.bare" config worktree.useRelativePaths true
@@ -267,8 +282,9 @@ post_create() {
 case "${1:-}" in
   new)    shift; cmd_new "$@" ;;
   add)    shift; cmd_add "$@" ;;
+  kit)    shift; cmd_kit "$@" ;;
   policy) shift; cmd_policy "$@" ;;
   repair) shift; cmd_repair "$@" ;;
   run)    shift; cmd_run "$@" ;;
-  *)      sed -n '2,10p' "$0"; exit 1 ;;
+  *)      sed -n '2,11p' "$0"; exit 1 ;;
 esac
