@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
 # harness: lays out a project's "harness" tree and launches Claude Code in sbx.
 #
-#   harness new [--infra] <name> [url]  creates <PROJECTS_ROOT>/<name>/{data,worktree/{.bare,main,shared,.claude,CLAUDE.md}}
-#                                        --infra: data/agent/ (mounted :ro in the VM), project kit, k8s section in CLAUDE.md
+#   harness new <name> [url] [--purpose S] [--cluster S] [--tools "a b"]
+#                                     creates <PROJECTS_ROOT>/<name>/{data,worktree/{.bare,main,shared,.claude,.harness,CLAUDE.md}}
+#                                     asks purpose, tools, cluster on a tty when the flag is absent; languages are detected in main/
 #   harness add <branch> [dir]        adds a worktree (from anywhere under the project)
-#   harness kit                       writes/refreshes worktree/.harness/kit/spec.yaml (projects created before the kit existed)
-#   harness repair                    resets worktree paths to relative (host <-> VM)
-#   harness policy                    adds the Go pilot's network hosts to the sbx policy
-#   harness run [--infra|--dev] [--fresh]   launches Claude Code in sbx, workspace = worktree/
-#                                        flavor inferred from the project (infra if data/agent or .harness/kit exists); --fresh: recreates
+#   harness md                        (re)generates CLAUDE.md, .claude/settings.json and .harness/kit from .harness/project.env
+#                                     + the tools detected in main/; asks the questions first if project.env is missing
+#   harness build [tag]               builds this project's image from its tools (build.sh); then `harness run --fresh`
+#   harness run [--fresh]             runs `harness md`, then launches Claude Code in sbx, workspace = worktree/; --fresh: recreates
 #   harness cost [--days N] [--by session]  token usage + API-equivalent USD of the project's sessions (cost.py, run in the VM)
+#   harness repair                    resets worktree paths to relative (host <-> VM)
+#   harness policy                    adds every tool's network hosts to the sbx policy
 #
-# Step 1 only: no credentials, no infra tools. That comes later (sbx kit).
+# A tool is a directory tools/<name>/ (Dockerfile, CLAUDE.md, allow, hosts, env); tools/ORDER lists them.
 
 set -euo pipefail
 
 PROJECTS_ROOT="${PROJECTS_ROOT:-$HOME/Documents/Projects}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="$SCRIPT_DIR/template"
+TOOLS_DIR="$SCRIPT_DIR/tools"
 
-# Hosts the Go pilot needs, on top of what sbx already allows for Claude.
 # Balanced already covers api.anthropic.com, github.com, the npm/pip registries.
 # In Locked Down you must add EVERYTHING, including api.anthropic.com.
-GO_HOSTS="proxy.golang.org,sum.golang.org,go.dev,dl.google.com,pkg.go.dev,github.com,raw.githubusercontent.com,objects.githubusercontent.com"
 CLAUDE_HOSTS="api.anthropic.com,statsig.anthropic.com"
 
 die() { printf 'harness: %s\n' "$*" >&2; exit 1; }
@@ -58,20 +59,188 @@ k8s_host() {
   srv="${srv#https://}"; srv="${srv#http://}"; printf '%s' "${srv%%/*}" | sed 's/:[0-9]*$//'
 }
 
-# Project kit: KUBECONFIG = absolute host path (identical in the VM), API host filled in if the kubeconfig already exists
-write_project_kit() {
-  local root="$1" kc="$1/data/agent/kubeconfig" host=CHANGEME.api-server
-  [[ -f "$kc" ]] && host="$(k8s_host "$kc")"
-  sed -e "s|@@K8S_HOST@@|$host|" \
-    "$TEMPLATE_DIR/project-kit/spec.yaml" > "$root/worktree/.harness/kit/spec.yaml"
-  log "project kit written: $root/worktree/.harness/kit/spec.yaml (API server: $host)"
+# ---------------------------------------------------------------- tools --
+
+# Non-comment, non-empty lines of tools/<tool>/<file>, nothing if absent
+frag() { [[ -f "$TOOLS_DIR/$1/$2" ]] && grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$TOOLS_DIR/$1/$2" || true; }
+
+check_tools() {
+  local t
+  for t in "$@"; do grep -qx "$t" "$TOOLS_DIR/ORDER" || die "unknown tool '$t' (see $TOOLS_DIR/ORDER)"; done
 }
 
+# Dedupes and sorts a set of tools into catalogue order
+order_tools() {
+  local want=" $* " t out=()
+  while read -r t; do [[ "$want" == *" $t "* ]] && out+=("$t"); done < "$TOOLS_DIR/ORDER"
+  printf '%s' "${out[*]:-}"
+}
+
+has_file() {  # $1 dir, $2 name pattern
+  [[ -n "$(find "$1" -maxdepth 3 \( -name .git -o -name node_modules -o -name .venv \) -prune -o -name "$2" -print -quit 2>/dev/null)" ]]
+}
+has_manifest() {  # a yaml with top-level apiVersion and kind
+  local f
+  while IFS= read -r f; do
+    grep -q '^apiVersion:' "$f" && grep -q '^kind:' "$f" && return 0
+  done < <(find "$1" -maxdepth 3 \( -name .git -o -name node_modules \) -prune -o \( -name '*.yaml' -o -name '*.yml' \) -print 2>/dev/null)
+  return 1
+}
+
+# Tools implied by the repository content. $1 = worktree/main, $2 = tools already selected.
+detect_tools() {
+  local d="$1" sel=" ${2:-} " out=""
+  [[ -d "$d" ]] || { printf ''; return; }
+  has_file "$d" go.mod && out+=" go"
+  { has_file "$d" package.json || has_file "$d" bun.lock || has_file "$d" bun.lockb; } && out+=" bun"
+  { has_file "$d" pyproject.toml || has_file "$d" requirements.txt || has_file "$d" setup.py; } && out+=" python"
+  { has_file "$d" kustomization.yaml || has_file "$d" Chart.yaml || has_manifest "$d"; } && out+=" kubectl"
+  has_file "$d" Chart.yaml && out+=" helm"
+  if has_file "$d" '*.tf'; then [[ "$sel" == *" tofu "* ]] || out+=" terraform"; fi
+  printf '%s' "${out# }"
+}
+
+# Sources .harness/project.env into PURPOSE, CLUSTER, TOOLS and computes EFFECTIVE (selected + detected)
+read_project() {
+  local wt="$1/worktree"
+  [[ -f "$wt/.harness/project.env" ]] || die "no $wt/.harness/project.env: run 'harness md' first"
+  PURPOSE="" CLUSTER="" TOOLS=""
+  # shellcheck disable=SC1091
+  . "$wt/.harness/project.env"
+  check_tools $TOOLS
+  EFFECTIVE="$(order_tools $TOOLS $(detect_tools "$wt/main" "$TOOLS"))"
+}
+
+# Fills .harness/project.env: from --purpose/--cluster/--tools (OPT_* set), else prompts on a tty, else defaults.
+interview() {
+  local root="$1" wt="$1/worktree" name; name="$(basename "$root")"
+  local detected; detected="$(order_tools $(detect_tools "$wt/main" "${OPT_TOOLS-}"))"
+  local purpose="${OPT_PURPOSE-}" cluster="${OPT_CLUSTER-}" tools="${OPT_TOOLS-}" tty=0
+  [[ -t 0 ]] && tty=1
+  if [[ -z "${OPT_PURPOSE+x}" && "$tty" == 1 ]]; then
+    read -r -p "> purpose of $name (one line): " purpose
+  fi
+  if [[ -z "${OPT_TOOLS+x}" ]]; then
+    if [[ "$tty" == 1 ]]; then
+      log "tools: $(tr '\n' ' ' < "$TOOLS_DIR/ORDER")"
+      [[ -n "$detected" ]] && log "detected in main/: $detected"
+      read -r -p "> tools [${detected:-none}]: " tools
+      [[ -n "$tools" ]] || tools="$detected"
+    else
+      tools="$detected"
+    fi
+  fi
+  check_tools $tools
+  tools="$(order_tools $tools)"
+  if [[ -z "${OPT_CLUSTER+x}" && "$tty" == 1 && " $tools " == *" kubectl "* ]]; then
+    read -r -p "> cluster context (empty if none): " cluster
+  fi
+
+  mkdir -p "$wt/.harness"
+  local line
+  while IFS= read -r line; do
+    line="${line//@@PURPOSE@@/${purpose//\"/\\\"}}"
+    line="${line//@@CLUSTER@@/${cluster//\"/\\\"}}"
+    line="${line//@@TOOLS@@/$tools}"
+    printf '%s\n' "$line"
+  done < "$TEMPLATE_DIR/project.env" > "$wt/.harness/project.env"
+  grep -qxF '.harness' "$wt/.bare/info/exclude" 2>/dev/null || printf '.harness\n' >> "$wt/.bare/info/exclude"
+  log "descriptor: $wt/.harness/project.env (tools: ${tools:-none})"
+
+  if [[ " $tools " == *" kubectl "* && ! -d "$root/data/agent" ]]; then
+    mkdir -p "$root/data/agent"
+    cp "$TEMPLATE_DIR/agent.env" "$root/data/agent/.env" && chmod 600 "$root/data/agent/.env"
+    log "drop your agent kubeconfig in $root/data/agent/kubeconfig, variables in data/agent/.env (mounted :ro in the VM)"
+  fi
+}
+
+# Replaces the block between the harness markers in $1 with the content of $2; text outside is kept.
+# A file without markers is replaced (backup in $1.bak).
+splice_markers() {
+  local file="$1" gen="$2" b='<!-- harness:begin -->' e='<!-- harness:end -->'
+  if [[ -f "$file" ]] && grep -qxF "$b" "$file" && grep -qxF "$e" "$file"; then
+    local tmp; tmp="$(mktemp)"
+    awk -v gen="$gen" -v b="$b" -v e="$e" '
+      $0 == b { print; while ((getline l < gen) > 0) print l; skip = 1; next }
+      $0 == e { skip = 0 }
+      !skip' "$file" > "$tmp" && mv "$tmp" "$file"
+  else
+    [[ -f "$file" ]] && { cp "$file" "$file.bak"; log "$file had no markers: replaced, backup $file.bak"; }
+    { printf '%s\n' "$b"; cat "$gen"; printf '%s\n' "$e"; } > "$file"
+  fi
+}
+
+# Derives CLAUDE.md, .claude/settings.json and .harness/kit/spec.yaml from project.env + detection.
+render_project() {
+  local root="$1" wt="$1/worktree" name; name="$(basename "$root")"
+  read_project "$root"
+  local t gen; gen="$(mktemp)"
+
+  # --- CLAUDE.md
+  {
+    printf '<!-- generated by `harness md` from .harness/project.env and tools/; edit those. Text outside the markers is kept. -->\n'
+    cat "$TEMPLATE_DIR/CLAUDE.md"
+    printf '\n## Project\n- %s: %s\n' "$name" "${PURPOSE:-(purpose not set: edit .harness/project.env)}"
+    [[ -n "$CLUSTER" ]] && printf -- '- Cluster: %s\n' "$CLUSTER"
+    printf -- '- Tools in the image: %s\n' "${EFFECTIVE:-none beyond the base image}"
+    for t in $EFFECTIVE; do [[ -f "$TOOLS_DIR/$t/CLAUDE.md" ]] && { printf '\n'; cat "$TOOLS_DIR/$t/CLAUDE.md"; }; done
+    printf '\n'; cat "$TEMPLATE_DIR/CLAUDE.tail.md"
+  } > "$gen"
+  splice_markers "$wt/CLAUDE.md" "$gen"
+
+  # --- settings.json
+  local allow="" l
+  for t in $EFFECTIVE; do
+    while IFS= read -r l; do allow+=$',\n      "'"$l"'"'; done < <(frag "$t" allow)
+  done
+  mkdir -p "$wt/.claude"
+  awk -v allow="$allow" 'index($0, "@@ALLOW@@") { sub(/@@ALLOW@@/, allow) } 1' \
+    "$TEMPLATE_DIR/settings.json" > "$wt/.claude/settings.json"
+  if command -v jq >/dev/null; then jq -e . "$wt/.claude/settings.json" >/dev/null || die "generated settings.json is not valid JSON"; fi
+
+  # --- project kit: tool hosts + .harness/hosts + API server, tool env
+  local hosts="" env="" h
+  if [[ " $EFFECTIVE " == *" kubectl "* ]]; then
+    h=CHANGEME.api-server; [[ -f "$root/data/agent/kubeconfig" ]] && h="$(k8s_host "$root/data/agent/kubeconfig")"
+    hosts+=$'      # Cluster API server (from data/agent/kubeconfig)\n      - '"$h"$'\n'
+  fi
+  for t in $EFFECTIVE; do
+    while IFS= read -r h; do [[ "$h" == *'*'* ]] && h="\"$h\""; hosts+="      - $h"$'\n'; done < <(frag "$t" hosts)
+  done
+  if [[ -f "$wt/.harness/hosts" ]]; then
+    while IFS= read -r h; do [[ "$h" =~ ^[[:space:]]*(#|$) ]] && continue; hosts+="      - $h"$'\n'; done < "$wt/.harness/hosts"
+  fi
+  [[ -n "$hosts" ]] || hosts=$'      []\n'
+  for t in $EFFECTIVE; do
+    while IFS= read -r l; do env+="    $l"$'\n'; done < <(frag "$t" env)
+  done
+  [[ -n "$env" ]] && env=$'environment:\n  variables:\n'"$env"
+  mkdir -p "$wt/.harness/kit"
+  awk -v hosts="${hosts%$'\n'}" -v env="${env%$'\n'}" '
+    $0 == "@@HOSTS@@" { print hosts; next }
+    $0 == "@@ENV@@"   { if (env != "") print env; next }
+    1' "$TEMPLATE_DIR/project-kit/spec.yaml" > "$wt/.harness/kit/spec.yaml"
+  grep -qxF '.harness' "$wt/.bare/info/exclude" 2>/dev/null || printf '.harness\n' >> "$wt/.bare/info/exclude"
+
+  printf '%s\n' "$EFFECTIVE" > "$wt/.harness/tools"
+  rm -f "$gen"
+  log "rendered: CLAUDE.md, .claude/settings.json, .harness/kit/spec.yaml (tools: ${EFFECTIVE:-none})"
+}
+
+# ------------------------------------------------------------- commands --
+
 cmd_new() {
-  local infra=0
-  [[ "${1:-}" == "--infra" ]] && { infra=1; shift; }
-  local name="${1:-}" remote="${2:-}"
-  [[ -n "$name" ]] || die "usage: harness new [--infra] <name> [remote-url]"
+  local name="" remote=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --purpose) OPT_PURPOSE="${2-}"; shift 2 ;;
+      --cluster) OPT_CLUSTER="${2-}"; shift 2 ;;
+      --tools)   OPT_TOOLS="${2-}";   shift 2 ;;
+      --*) die "unknown option $1" ;;
+      *) if [[ -z "$name" ]]; then name="$1"; else remote="$1"; fi; shift ;;
+    esac
+  done
+  [[ -n "$name" ]] || die "usage: harness new <name> [remote-url] [--purpose S] [--cluster S] [--tools \"a b\"]"
   local root="$PROJECTS_ROOT/$name" wt="$PROJECTS_ROOT/$name/worktree"
   [[ -e "$root" ]] && die "$root already exists"
   need_git_248
@@ -116,17 +285,9 @@ cmd_new() {
   fi
   link_claude "$wt/main"
 
-  # --- harness files
-  cp "$TEMPLATE_DIR/CLAUDE.md" "$wt/CLAUDE.md"
-  cp "$TEMPLATE_DIR/settings.json" "$wt/.claude/settings.json"
-  if [[ "$infra" == 1 ]]; then
-    mkdir -p "$root/data/agent" "$wt/.harness/kit"
-    cp "$TEMPLATE_DIR/agent.env" "$root/data/agent/.env" && chmod 600 "$root/data/agent/.env"
-    write_project_kit "$root"
-    cat "$TEMPLATE_DIR/CLAUDE.infra.md" >> "$wt/CLAUDE.md"
-    printf '.harness\n' >> "$wt/.bare/info/exclude"
-    log "drop your agent kubeconfig in $root/data/agent/kubeconfig, variables in data/agent/.env (mounted :ro in the VM)"
-  fi
+  # --- descriptor (questions), then everything derived from it
+  interview "$root"
+  render_project "$root"
   cat > "$wt/shared/README.md" <<'EOF'
 # shared/
 
@@ -142,7 +303,7 @@ Never launch sbx from here or from the parent folder.
 EOF
 
   log "ok. Next:"
-  printf '   cd %s && %s run\n' "$wt" "$SCRIPT_DIR/harness"
+  printf '   cd %s && %s build && %s run\n' "$wt" "$SCRIPT_DIR/harness" "$SCRIPT_DIR/harness"
 }
 
 cmd_add() {
@@ -159,19 +320,31 @@ cmd_add() {
   log "worktree $wt/$dir on $branch"
 }
 
-# Repairs worktree paths (after mounting elsewhere, or a "repair" done by the agent)
-# Project kit for an existing project (created before the kit existed, or kubeconfig changed). Then `harness run --fresh`.
-cmd_kit() {
-  local root wt; root="$(find_root)"; wt="$root/worktree"
-  local spec="$wt/.harness/kit/spec.yaml"
-  [[ -f "$root/data/agent/kubeconfig" ]] || die "no $root/data/agent/kubeconfig (drop the agent kubeconfig there first)"
-  if [[ -f "$spec" ]]; then
-    local old="$spec.bak"; cp "$spec" "$old"; log "existing kit saved as $old (custom hosts must be re-added)"
-  fi
-  mkdir -p "$wt/.harness/kit"
-  write_project_kit "$root"
-  grep -qxF '.harness' "$wt/.bare/info/exclude" 2>/dev/null || printf '.harness\n' >> "$wt/.bare/info/exclude"
-  log "sandbox kits are frozen at creation: run 'harness run --fresh' to apply"
+# Regenerates the derived files. Projects created before the descriptor existed get the questions first.
+cmd_md() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --purpose) OPT_PURPOSE="${2-}"; shift 2 ;;
+      --cluster) OPT_CLUSTER="${2-}"; shift 2 ;;
+      --tools)   OPT_TOOLS="${2-}";   shift 2 ;;
+      *) die "usage: harness md [--purpose S] [--cluster S] [--tools \"a b\"]" ;;
+    esac
+  done
+  local root; root="$(find_root)"
+  [[ -f "$root/worktree/.harness/project.env" ]] || interview "$root"
+  render_project "$root"
+  log "kits and images are frozen at sandbox creation: 'harness run --fresh' to apply a host/env change, 'harness build' first for a tool change"
+}
+
+cmd_build() {
+  local root; root="$(find_root)"; local wt="$root/worktree" name; name="$(basename "$root")"
+  read_project "$root"
+  local tag="${1:-$(date +%Y.%m.%d)}"
+  TOOLS="$EFFECTIVE" "$SCRIPT_DIR/build.sh" "$name" "$tag"
+  mkdir -p "$wt/.harness"
+  printf '%s\n' "$tag" > "$wt/.harness/image.tag"
+  printf '%s\n' "$EFFECTIVE" > "$wt/.harness/image.tools"
+  log "image tag $tag recorded in .harness/image.tag; 'harness run --fresh' to use it"
 }
 
 cmd_repair() {
@@ -186,8 +359,12 @@ cmd_repair() {
 
 cmd_policy() {
   command -v sbx >/dev/null || die "sbx not found (brew install docker/tap/sbx)"
-  log "network allow-list: Go + Claude"
-  sbx policy allow network "$GO_HOSTS"
+  local t hosts=""
+  while read -r t; do
+    while IFS= read -r h; do [[ "$h" == *'*'* ]] || hosts+="$h,"; done < <(frag "$t" hosts)
+  done < "$TOOLS_DIR/ORDER"
+  log "network allow-list: every tool's hosts + Claude"
+  sbx policy allow network "${hosts%,}"
   sbx policy allow network "$CLAUDE_HOSTS"
   log "state:"
   sbx policy ls
@@ -195,11 +372,9 @@ cmd_policy() {
 
 cmd_run() {
   command -v sbx >/dev/null || die "sbx not found (brew install docker/tap/sbx)"
-  local flavor="" fresh=0
+  local fresh=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
-      --infra) flavor=infra ;;
-      --dev)   flavor=dev ;;
       --fresh) fresh=1 ;;          # sbx rm then recreate (new image / new kit)
       *) break ;;
     esac
@@ -208,20 +383,17 @@ cmd_run() {
   local root; root="$(find_root)"
   local wt="$root/worktree" name; name="$(basename "$root")"
   local args=(--name "$name") mounts=("$wt")
-  # Flavor: `harness new --infra` leaves a project kit behind; use it so `run` needs no flag afterwards.
-  if [[ -z "$flavor" ]]; then
-    if [[ -d "$root/data/agent" || -f "$wt/.harness/kit/spec.yaml" ]]; then flavor=infra; else flavor=dev; fi
-    log "flavor $flavor (inferred; --dev/--infra to override)"
-  fi
+  # Refresh CLAUDE.md, settings and kit: a language that appeared in main/ since the last run gets its section.
+  render_project "$root"
 
   # data/agent: the only subfolder of data/ visible to the agent, read-only
   if [[ -d "$root/data/agent" ]]; then
     mounts+=("$root/data/agent:ro")
     local kc="$root/data/agent/kubeconfig"
-    if [[ -f "$kc" && -f "$wt/.harness/kit/spec.yaml" ]]; then
+    if [[ -f "$kc" ]]; then
       local host; host="$(k8s_host "$kc")"
       grep -qF -- "- $host" "$wt/.harness/kit/spec.yaml" \
-        || die "the API server '$host' (data/agent/kubeconfig) is not in $wt/.harness/kit/spec.yaml, add '      - $host' under permissions.network.allow"
+        || die "the API server '$host' (data/agent/kubeconfig) is not in $wt/.harness/kit/spec.yaml (is kubectl in TOOLS?)"
     fi
   fi
 
@@ -237,17 +409,15 @@ cmd_run() {
     log "HARNESS_PLAIN=1: default sbx image, no kit"
   else
     local repo="${HARNESS_IMAGE_REPO:-}" tag
-    tag="$(cat "$SCRIPT_DIR/image/TAG" 2>/dev/null || true)"
     [[ -n "$repo" ]] || die "HARNESS_IMAGE_REPO not set (e.g. export HARNESS_IMAGE_REPO=docker.io/you/harness), or set HARNESS_PLAIN=1"
-    [[ -n "$tag"  ]] || die "$SCRIPT_DIR/image/TAG missing: run ./build.sh first"
-    args+=(--template "$repo:$flavor-$tag" --kit "$SCRIPT_DIR/kits/harness-$flavor")
-    if [[ -f "$wt/.harness/kit/spec.yaml" ]]; then
-      grep -q CHANGEME "$wt/.harness/kit/spec.yaml" && die "$wt/.harness/kit/spec.yaml still contains CHANGEME"
-      args+=(--kit "$wt/.harness/kit")
-      log "creating: image $repo:$flavor-$tag + kits harness-$flavor, project"
-    else
-      log "creating: image $repo:$flavor-$tag + kit harness-$flavor"
+    tag="$(cat "$wt/.harness/image.tag" 2>/dev/null || true)"
+    [[ -n "$tag" ]] || die "no image for '$name': run 'harness build' first"
+    if [[ "$(cat "$wt/.harness/image.tools" 2>/dev/null)" != "$EFFECTIVE" ]]; then
+      log "WARNING: tools changed since the image was built ($(cat "$wt/.harness/image.tools" 2>/dev/null || echo none) -> ${EFFECTIVE:-none}): 'harness build' then 'harness run --fresh'"
     fi
+    grep -q CHANGEME "$wt/.harness/kit/spec.yaml" && die "$wt/.harness/kit/spec.yaml still contains CHANGEME (drop the kubeconfig in data/agent/, then 'harness md')"
+    args+=(--template "$repo:$name-$tag" --kit "$SCRIPT_DIR/kits/harness-base" --kit "$wt/.harness/kit")
+    log "creating: image $repo:$name-$tag + kits harness-base, project"
   fi
   # Guardrail: the workspace is ALWAYS worktree/, never the parent (data/ would be mounted).
   cd "$wt"
@@ -290,10 +460,11 @@ post_create() {
 case "${1:-}" in
   new)    shift; cmd_new "$@" ;;
   add)    shift; cmd_add "$@" ;;
-  kit)    shift; cmd_kit "$@" ;;
+  md)     shift; cmd_md "$@" ;;
+  build)  shift; cmd_build "$@" ;;
   policy) shift; cmd_policy "$@" ;;
   repair) shift; cmd_repair "$@" ;;
   run)    shift; cmd_run "$@" ;;
   cost)   shift; cmd_cost "$@" ;;
-  *)      sed -n '2,12p' "$0"; exit 1 ;;
+  *)      sed -n '2,15p' "$0"; exit 1 ;;
 esac

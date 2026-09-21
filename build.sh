@@ -6,7 +6,8 @@
 # Dockerfile = image/Dockerfile.base + tools/<t>/Dockerfile (catalogue order, tools/ORDER)
 #              + image/Dockerfile.tail. Same prefix across projects = shared layers.
 # `harness build` calls this with the project's tools and name; the image is
-# <repo>:<image-name>-<tag>. DRY=1 prints the assembled Dockerfile and stops.
+# <repo>:<image-name>-<tag> and records the tag in .harness/image.tag.
+# DRY=1 prints the assembled Dockerfile and stops.
 #
 # A private Docker Hub repo is recommended: sbx reuses your `sbx login` session
 # to pull the image. Another registry requires `sbx secret set --registry <host>`.
@@ -44,6 +45,3 @@ REPO="${HARNESS_IMAGE_REPO:?HARNESS_IMAGE_REPO missing (e.g. docker.io/you/harne
 out=(--load); [[ "$PUSH" == 1 ]] && out=(--push)
 printf 'build %s [%s] (%s) -> %s:%s-%s\n' "$NAME" "$TOOLS" "$PLATFORM" "$REPO" "$NAME" "$TAG"
 docker buildx build --platform "$PLATFORM" -f "$df" -t "$REPO:$NAME-$TAG" "${out[@]}" image
-
-printf '%s\n' "$TAG" > image/TAG
-printf 'tag %s written to image/TAG; `harness run` will use it\n' "$TAG"
