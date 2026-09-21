@@ -1,0 +1,4 @@
+Bash(tofu fmt:*)
+Bash(tofu validate:*)
+Bash(tofu providers:*)
+Bash(tofu version:*)

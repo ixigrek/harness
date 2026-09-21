@@ -1,0 +1,4 @@
+Bash(flux get:*)
+Bash(flux tree:*)
+Bash(flux diff:*)
+Bash(flux version:*)
