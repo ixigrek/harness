@@ -7,7 +7,7 @@
 #   harness repair                    resets worktree paths to relative (host <-> VM)
 #   harness policy                    adds the Go pilot's network hosts to the sbx policy
 #   harness run [--infra|--dev] [--fresh]   launches Claude Code in sbx, workspace = worktree/
-#                                        flavor inferred from the project (infra if .harness/kit exists); --fresh: recreates
+#                                        flavor inferred from the project (infra if data/agent or .harness/kit exists); --fresh: recreates
 #
 # Step 1 only: no credentials, no infra tools. That comes later (sbx kit).
 
@@ -194,7 +194,7 @@ cmd_run() {
   local args=(--name "$name") mounts=("$wt")
   # Flavor: `harness new --infra` leaves a project kit behind; use it so `run` needs no flag afterwards.
   if [[ -z "$flavor" ]]; then
-    if [[ -f "$wt/.harness/kit/spec.yaml" ]]; then flavor=infra; else flavor=dev; fi
+    if [[ -d "$root/data/agent" || -f "$wt/.harness/kit/spec.yaml" ]]; then flavor=infra; else flavor=dev; fi
     log "flavor $flavor (inferred; --dev/--infra to override)"
   fi
 

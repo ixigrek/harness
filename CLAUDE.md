@@ -32,7 +32,7 @@ harness new [--infra] <name> [remote-url]                      # lay out <PROJEC
 harness add <branch> [dir]                                     # new worktree under worktree/
 harness repair                                                 # re-relativise worktree paths
 harness policy                                                 # sbx policy allow for Go + Claude hosts
-harness run [--infra|--dev] [--fresh]                          # create/reattach sandbox, workspace = worktree/; flavor inferred from .harness/kit
+harness run [--infra|--dev] [--fresh]                          # create/reattach sandbox, workspace = worktree/; flavor inferred from data/agent or .harness/kit
 HARNESS_PLAIN=1 harness run                                    # default sbx image, no kit
 ```
 
