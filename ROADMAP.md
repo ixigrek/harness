@@ -52,7 +52,8 @@ top of it. Everything else is parked, not planned.
 - [x] Project kit `worktree/.harness/kit/spec.yaml`: API server host (derived from the kubeconfig)
 - [x] Talos cluster reachable on the LAN, TLS intact, RBAC effective from inside the VM
 - [x] `data/agent/.env` (POSIX sh, `$AGENT_DIR`) + `.env.session`; loader written by `post_create` into `/etc/sandbox-persistent.sh`, `~/.profile`, `~/.bashrc`; symlink `~/.kube/config`
-- [?] Is the loader sourced by the agent process? (`!echo $AGENT_DIR $KUBECONFIG` in Claude Code after a restart). **Do first**: every other provider relies on it
+- [x] Loader sourced by the agent process (verified 2026-09-21 in `talos`: `$AGENT_DIR` set)
+- [?] `KUBECONFIG` was empty in the same check: `data/agent/.env` missing or without the `export KUBECONFIG` line in `talos`. `~/.kube/config` symlink covers kubectl anyway
 - [?] The LAN IP in the project kit: the allow was added from the TUI. Bare vs `/32` vs policy level, check with `sbx policy ls`
 
 ### In scope [ ]
@@ -122,7 +123,6 @@ Reminder: Headroom sets `ANTHROPIC_BASE_URL`, so the context is handled as 200k,
 
 ## Open points / debt
 
-- [?] `/etc/sandbox-persistent.sh` loader sourced by the agent (see step 3)
 - [?] Does `sbx create` accept the same syntax as `sbx run` (create/post-create/run has not yet been exercised with `--fresh`)
 - [?] Private IPs in the kits
 - `downloads.claude.ai` hit at boot despite `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` (probably sbx provisioning the agent). Benign
