@@ -53,7 +53,7 @@ top of it. Everything else is parked, not planned.
 - [x] Talos cluster reachable on the LAN, TLS intact, RBAC effective from inside the VM
 - [x] `data/agent/.env` (POSIX sh, `$AGENT_DIR`) + `.env.session`; loader written by `post_create` into `/etc/sandbox-persistent.sh`, `~/.profile`, `~/.bashrc`; symlink `~/.kube/config`
 - [x] Loader sourced by the agent process (verified 2026-09-21 in `talos`: `$AGENT_DIR` set)
-- [?] `KUBECONFIG` was empty in the same check: `data/agent/.env` missing or without the `export KUBECONFIG` line in `talos`. `~/.kube/config` symlink covers kubectl anyway
+- [x] `KUBECONFIG` empty in the same check: the sandbox had been created without `--infra`. `run` now infers the flavor from `.harness/kit/spec.yaml`; `--dev`/`--infra` override
 - [?] The LAN IP in the project kit: the allow was added from the TUI. Bare vs `/32` vs policy level, check with `sbx policy ls`
 
 ### In scope [ ]

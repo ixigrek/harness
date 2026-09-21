@@ -6,8 +6,8 @@
 #   harness add <branch> [dir]        adds a worktree (from anywhere under the project)
 #   harness repair                    resets worktree paths to relative (host <-> VM)
 #   harness policy                    adds the Go pilot's network hosts to the sbx policy
-#   harness run [--infra] [--fresh]   launches Claude Code in sbx, workspace = worktree/
-#                                        --infra: infra image/kit; --fresh: recreates the sandbox
+#   harness run [--infra|--dev] [--fresh]   launches Claude Code in sbx, workspace = worktree/
+#                                        flavor inferred from the project (infra if .harness/kit exists); --fresh: recreates
 #
 # Step 1 only: no credentials, no infra tools. That comes later (sbx kit).
 
@@ -179,10 +179,11 @@ cmd_policy() {
 
 cmd_run() {
   command -v sbx >/dev/null || die "sbx not found (brew install docker/tap/sbx)"
-  local flavor=dev fresh=0
+  local flavor="" fresh=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --infra) flavor=infra ;;
+      --dev)   flavor=dev ;;
       --fresh) fresh=1 ;;          # sbx rm then recreate (new image / new kit)
       *) break ;;
     esac
@@ -191,6 +192,11 @@ cmd_run() {
   local root; root="$(find_root)"
   local wt="$root/worktree" name; name="$(basename "$root")"
   local args=(--name "$name") mounts=("$wt")
+  # Flavor: `harness new --infra` leaves a project kit behind; use it so `run` needs no flag afterwards.
+  if [[ -z "$flavor" ]]; then
+    if [[ -f "$wt/.harness/kit/spec.yaml" ]]; then flavor=infra; else flavor=dev; fi
+    log "flavor $flavor (inferred; --dev/--infra to override)"
+  fi
 
   # data/agent: the only subfolder of data/ visible to the agent, read-only
   if [[ -d "$root/data/agent" ]]; then
