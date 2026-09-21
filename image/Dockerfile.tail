@@ -1,0 +1,13 @@
+
+# Telemetry / update checks off: nothing should try to phone home on its own
+ENV GOTOOLCHAIN=local \
+    GOFLAGS=-mod=mod \
+    CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true \
+    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true \
+    AZURE_CORE_COLLECT_TELEMETRY=false \
+    CHECKPOINT_DISABLE=1 \
+    HCLOUD_CLI_TELEMETRY=off \
+    SCW_DISABLE_CHECK_VERSION=true
+
+USER agent
+WORKDIR /home/agent

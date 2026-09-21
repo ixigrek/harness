@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Compare the Dockerfile's *_VERSION ARGs against the latest GitHub releases (no API, via redirects)."""
+"""Compare the tools/*/Dockerfile *_VERSION ARGs against the latest GitHub releases (no API, via redirects)."""
 import re, sys, pathlib, urllib.request, urllib.error
-DF = pathlib.Path(__file__).parent / "image" / "Dockerfile"
+DF = sorted((pathlib.Path(__file__).parent / "tools").glob("*/Dockerfile"))
 REPOS = {  # ARG -> (repo, arm64 asset pattern or None)
  "BUN_VERSION": ("oven-sh/bun", "bun-linux-aarch64.zip"),
  "KUBECTL_VERSION": ("kubernetes/kubernetes", None),
@@ -23,7 +23,7 @@ op = urllib.request.build_opener(NR)
 def head(url, method="HEAD"):
     try: op.open(urllib.request.Request(url, method=method, headers={"User-Agent": "harness"}), timeout=20); return 200, None
     except urllib.error.HTTPError as e: return e.code, e.headers.get("Location")
-pinned = dict(re.findall(r"ARG (\w+_VERSION)=(\S+)", DF.read_text()))
+pinned = dict(re.findall(r"ARG (\w+_VERSION)=(\S+)", "\n".join(f.read_text() for f in DF)))
 rc = 0
 for arg, (repo, pat) in REPOS.items():
     code, loc = head(f"https://github.com/{repo}/releases/latest")

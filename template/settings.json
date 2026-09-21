@@ -4,22 +4,10 @@
   "effortLevel": "high",
   "disableClaudeAiConnectors": true,
   "env": {
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "GOFLAGS": "-mod=mod",
-    "GOTOOLCHAIN": "local"
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   },
   "permissions": {
     "allow": [
-      "Bash(go build:*)",
-      "Bash(go test:*)",
-      "Bash(go vet:*)",
-      "Bash(go run:*)",
-      "Bash(go mod tidy:*)",
-      "Bash(go mod download:*)",
-      "Bash(go list:*)",
-      "Bash(go doc:*)",
-      "Bash(gofmt:*)",
-      "Bash(golangci-lint run:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
@@ -32,7 +20,7 @@
       "Bash(tree:*)",
       "Bash(wc:*)",
       "Bash(head:*)",
-      "Bash(tail:*)"
+      "Bash(tail:*)"@@ALLOW@@
     ],
     "deny": [
       "Bash(apt:*)",

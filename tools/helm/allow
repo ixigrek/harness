@@ -1,0 +1,4 @@
+Bash(helm template:*)
+Bash(helm show:*)
+Bash(helm lint:*)
+Bash(helm version:*)

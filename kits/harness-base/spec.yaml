@@ -1,0 +1,26 @@
+schemaVersion: "2"
+kind: mixin
+name: harness-base
+displayName: Harness (base)
+description: Common to every harness project. Stacked with the generated project kit (worktree/.harness/kit) by `harness run`.
+
+requires:
+  agent: claude
+
+# The base `claude` kit already allows the Anthropic hosts.
+permissions:
+  network:
+    allow:
+      # Sources & docs
+      - github.com
+      - api.github.com
+      - raw.githubusercontent.com
+      - objects.githubusercontent.com
+    deny:
+      - telemetry.go.dev
+      - checkpoint-api.hashicorp.com
+
+environment:
+  variables:
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    DO_NOT_TRACK: "1"

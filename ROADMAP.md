@@ -73,8 +73,8 @@ Azure (`Reader` SP), Hetzner (read token), Scaleway (`AllProductsReadOnly`), AWS
 GCP (`roles/viewer`), OVH (`GET /*` keys). The delivery mechanisms are known (`.env`, `sbx secret`,
 `.env.session`); pick them up only when a project actually needs one.
 
-Backlog: the `infra` image ships `aws`, `gcloud`, `az`, `hcloud`, `scw`, `ovhcloud` for nothing.
-Consider dropping them at the next rebuild to shrink the image.
+~~Backlog: the `infra` image ships `aws`, `gcloud`, `az`, `hcloud`, `scw`, `ovhcloud` for nothing.~~
+Solved by the per-project image (Step 6, 2026-09-21): a project only ships the tools in its descriptor.
 
 Out of scope (decided): the Grafana/Loki/Tempo stack. Logs are `data/` through another door.
 
@@ -111,8 +111,13 @@ Reminder: Headroom sets `ANTHROPIC_BASE_URL`, so the context is handled as 200k,
 
 - [ ] Document the harness (README) so it can be picked up again in six months. Before the migration: it is what makes the rest survive
 - [ ] Migrate the existing sandboxes (`claude-*`) to `harness new`; `my-bank-account` with a deterministic redaction script from `data/` to `shared/`
-- [ ] `CLAUDE.md` template per project type (Go / Bun / infra) with the cluster/provider context
-- [ ] Weekly image rebuild (`check-versions.py`, then `build.sh`, then `harness run --fresh`)
+- [x] Project descriptor + per-tool catalogue + per-project image (2026-09-21). Origin: on `talos`, Claude read the template's `## Go` section and concluded "talos is a Go tool whose Go side has not been written yet"
+  - `harness new` asks what cannot be inferred (purpose, tools, cluster; flags `--purpose/--tools/--cluster` for scripts) and writes `worktree/.harness/project.env`. Languages are detected in `main/` (`go.mod`, `package.json`, `pyproject.toml`, manifests, `*.tf`), never asked
+  - `tools/<name>/{Dockerfile,CLAUDE.md,allow,hosts,env}`: one directory per tool, order in `tools/ORDER`. Everything the harness knows about a tool lives there
+  - `harness md` renders `CLAUDE.md` (between `<!-- harness:begin/end -->` markers, hand-written text outside is kept), `.claude/settings.json` (allow-list per tool) and `.harness/kit/spec.yaml` (hosts + env per tool, API server from the kubeconfig, extras in `.harness/hosts`). `harness run` calls it every time, so an empty project picks up its language when a `go.mod` appears
+  - `harness build` assembles `image/Dockerfile.base` + the project's fragments + `image/Dockerfile.tail` into `<repo>:<project>-<tag>` (`build.sh`, `DRY=1` to print it). `run` uses that image with kits `harness-base` + project; warns when the detected tools differ from the image's. `--dev/--infra`, the flavor inference, `harness kit`, `kits/harness-dev`, `kits/harness-infra`, `template/CLAUDE.infra.md`, `image/TAG` are gone
+  - Existing projects: `harness md` (asks the questions once), `harness build`, `harness run --fresh`. To do on `talos`
+- [ ] Weekly image rebuild: `check-versions.py`, then `harness build` in every project, then `harness run --fresh`. One image per project now; shared layers as long as the tool order is the same
 
 ---
 
@@ -122,7 +127,7 @@ Reminder: Headroom sets `ANTHROPIC_BASE_URL`, so the context is handled as 200k,
 2. Step 5: ~~MCP inventory~~, then the baseline week (started 2026-09-21; `harness cost` at the end, before any `--fresh`)
 3. Step 3: ArgoCD read-only identity
 4. Step 5: Headroom trial, if the baseline still hurts
-5. Step 6: README, then migration, then rebuild routine
+5. Step 6: ~~descriptor + per-project image~~ (2026-09-21), README, then migration, then rebuild routine
 
 ---
 

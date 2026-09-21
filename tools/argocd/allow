@@ -1,0 +1,4 @@
+Bash(argocd app get:*)
+Bash(argocd app list:*)
+Bash(argocd app diff:*)
+Bash(argocd version:*)
