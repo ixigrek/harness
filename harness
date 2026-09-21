@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# harness: lays out a project's "harness" tree and launches Claude Code in sbx.
+#
+#   harness new [--infra] <name> [url]  creates <PROJECTS_ROOT>/<name>/{data,worktree/{.bare,main,shared,.claude,CLAUDE.md}}
+#                                        --infra: data/agent/ (mounted :ro in the VM), project kit, k8s section in CLAUDE.md
+#   harness add <branch> [dir]        adds a worktree (from anywhere under the project)
+#   harness repair                    resets worktree paths to relative (host <-> VM)
+#   harness policy                    adds the Go pilot's network hosts to the sbx policy
+#   harness run [--infra] [--fresh]   launches Claude Code in sbx, workspace = worktree/
+#                                        --infra: infra image/kit; --fresh: recreates the sandbox
+#
+# Step 1 only: no credentials, no infra tools. That comes later (sbx kit).
+
+set -euo pipefail
+
+PROJECTS_ROOT="${PROJECTS_ROOT:-$HOME/Documents/Projects}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_DIR="$SCRIPT_DIR/template"
+
+# Hosts the Go pilot needs, on top of what sbx already allows for Claude.
+# Balanced already covers api.anthropic.com, github.com, the npm/pip registries.
+# In Locked Down you must add EVERYTHING, including api.anthropic.com.
+GO_HOSTS="proxy.golang.org,sum.golang.org,go.dev,dl.google.com,pkg.go.dev,github.com,raw.githubusercontent.com,objects.githubusercontent.com"
+CLAUDE_HOSTS="api.anthropic.com,statsig.anthropic.com"
+
+die() { printf 'harness: %s\n' "$*" >&2; exit 1; }
+
+need_git_248() {
+  local v; v="$(git --version | awk '{print $3}')"
+  [[ "$(printf '%s\n2.48.0\n' "$v" | sort -V | head -1)" == "2.48.0" ]] \
+    || die "git >= 2.48 required for worktree.useRelativePaths (found $v)"
+}
+log() { printf '> %s\n' "$*"; }
+
+# Walk up to the folder that contains worktree/.bare
+find_root() {
+  local d="$PWD"
+  while [[ "$d" != "/" ]]; do
+    [[ -d "$d/worktree/.bare" ]] && { printf '%s' "$d"; return; }
+    d="$(dirname "$d")"
+  done
+  die "not in a harness project (no worktree/.bare found above $PWD)"
+}
+
+# Symlink .claude into a worktree + git exclusion, so that settings.json
+# is found even when Claude is launched from the worktree rather than from worktree/.
+link_claude() {
+  local wt_dir="$1"
+  ln -sfn ../.claude "$wt_dir/.claude"
+}
+
+# API server host as the sbx proxy sees it (no scheme, no port)
+k8s_host() {
+  local kc="$1" srv
+  srv="$(awk '/^ *server:/{print $2; exit}' "$kc" 2>/dev/null)"
+  srv="${srv#https://}"; srv="${srv#http://}"; printf '%s' "${srv%%/*}" | sed 's/:[0-9]*$//'
+}
+
+# Project kit: KUBECONFIG = absolute host path (identical in the VM), API host filled in if the kubeconfig already exists
+write_project_kit() {
+  local root="$1" kc="$1/data/agent/kubeconfig" host=CHANGEME.api-server
+  [[ -f "$kc" ]] && host="$(k8s_host "$kc")"
+  sed -e "s|@@K8S_HOST@@|$host|" \
+    "$TEMPLATE_DIR/project-kit/spec.yaml" > "$root/worktree/.harness/kit/spec.yaml"
+  log "project kit written: $root/worktree/.harness/kit/spec.yaml (API server: $host)"
+}
+
+cmd_new() {
+  local infra=0
+  [[ "${1:-}" == "--infra" ]] && { infra=1; shift; }
+  local name="${1:-}" remote="${2:-}"
+  [[ -n "$name" ]] || die "usage: harness new [--infra] <name> [remote-url]"
+  local root="$PROJECTS_ROOT/$name" wt="$PROJECTS_ROOT/$name/worktree"
+  [[ -e "$root" ]] && die "$root already exists"
+  need_git_248
+
+  log "creating $root"
+  mkdir -p "$root/data" "$wt/shared" "$wt/.claude"
+  chmod 700 "$root/data"          # outside the sbx workspace, and unreadable by other users
+
+  # --- bare repo + .git pointer so that `git worktree` works from worktree/
+  if [[ -n "$remote" ]]; then
+    log "bare clone of $remote"
+    git clone --bare --quiet "$remote" "$wt/.bare"
+    git -C "$wt/.bare" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+    git -C "$wt/.bare" fetch --quiet origin
+  else
+    git init --bare --quiet -b main "$wt/.bare"
+  fi
+  printf 'gitdir: ./.bare\n' > "$wt/.git"
+  printf '.claude\n' >> "$wt/.bare/info/exclude"
+
+  # Relative paths in .bare/worktrees/*/gitdir and <wt>/.git (git >= 2.48):
+  # without this, worktrees point at absolute host paths and break as soon
+  # as the workspace is mounted elsewhere (inside the sbx VM).
+  git -C "$wt/.bare" config worktree.useRelativePaths true
+  # Repo-level git identity: the sandbox does not inherit ~/.gitconfig.
+  git -C "$wt/.bare" config user.name  "${GIT_AUTHOR_NAME:-$(git config --global user.name  || echo harness)}"
+  git -C "$wt/.bare" config user.email "${GIT_AUTHOR_EMAIL:-$(git config --global user.email || echo harness@local)}"
+
+  # --- main worktree
+  if git -C "$wt" show-ref --verify --quiet refs/heads/main; then
+    git -C "$wt" worktree add --quiet "$wt/main" main
+  else
+    # empty repo: initial commit via a temporary clone, then push into the bare repo
+    local tmp; tmp="$(mktemp -d)"
+    git init --quiet -b main "$tmp"
+    printf '# %s\n' "$name" > "$tmp/README.md"
+    git -C "$tmp" add README.md
+    git -C "$tmp" -c user.name=harness -c user.email=harness@local commit --quiet -m "chore: initial commit"
+    git -C "$tmp" push --quiet "$wt/.bare" main
+    rm -rf "$tmp"
+    git -C "$wt" worktree add --quiet "$wt/main" main
+  fi
+  link_claude "$wt/main"
+
+  # --- harness files
+  cp "$TEMPLATE_DIR/CLAUDE.md" "$wt/CLAUDE.md"
+  cp "$TEMPLATE_DIR/settings.json" "$wt/.claude/settings.json"
+  if [[ "$infra" == 1 ]]; then
+    mkdir -p "$root/data/agent" "$wt/.harness/kit"
+    cp "$TEMPLATE_DIR/agent.env" "$root/data/agent/.env" && chmod 600 "$root/data/agent/.env"
+    write_project_kit "$root"
+    cat "$TEMPLATE_DIR/CLAUDE.infra.md" >> "$wt/CLAUDE.md"
+    printf '.harness\n' >> "$wt/.bare/info/exclude"
+    log "drop your agent kubeconfig in $root/data/agent/kubeconfig, variables in data/agent/.env (mounted :ro in the VM)"
+  fi
+  cat > "$wt/shared/README.md" <<'EOF'
+# shared/
+
+Redacted copies of the datasets in `../../data/` (outside the sandbox).
+Produced by a deterministic script on the host. Never edited by hand,
+never generated by the agent.
+EOF
+  cat > "$root/data/README.md" <<'EOF'
+# data/
+
+Real data. This folder is NOT mounted in the sandbox.
+Never launch sbx from here or from the parent folder.
+EOF
+
+  log "ok. Next:"
+  printf '   cd %s && %s run\n' "$wt" "$SCRIPT_DIR/harness"
+}
+
+cmd_add() {
+  local branch="${1:-}" dir="${2:-${1:-}}"
+  [[ -n "$branch" ]] || die "usage: harness add <branch> [dir]"
+  local wt; wt="$(find_root)/worktree"
+  [[ -e "$wt/$dir" ]] && die "$wt/$dir already exists"
+  if git -C "$wt" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$wt" worktree add --quiet "$wt/$dir" "$branch"
+  else
+    git -C "$wt" worktree add --quiet -b "$branch" "$wt/$dir" main
+  fi
+  link_claude "$wt/$dir"
+  log "worktree $wt/$dir on $branch"
+}
+
+# Repairs worktree paths (after mounting elsewhere, or a "repair" done by the agent)
+cmd_repair() {
+  local wt; wt="$(find_root)/worktree"
+  git -C "$wt/.bare" config worktree.useRelativePaths true
+  local d
+  for d in "$wt"/*/; do
+    [[ -f "$d/.git" ]] && git -C "$wt" worktree repair --relative-paths "$d" 2>/dev/null || true
+  done
+  git -C "$wt" worktree list
+}
+
+cmd_policy() {
+  command -v sbx >/dev/null || die "sbx not found (brew install docker/tap/sbx)"
+  log "network allow-list: Go + Claude"
+  sbx policy allow network "$GO_HOSTS"
+  sbx policy allow network "$CLAUDE_HOSTS"
+  log "state:"
+  sbx policy ls
+}
+
+cmd_run() {
+  command -v sbx >/dev/null || die "sbx not found (brew install docker/tap/sbx)"
+  local flavor=dev fresh=0
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --infra) flavor=infra ;;
+      --fresh) fresh=1 ;;          # sbx rm then recreate (new image / new kit)
+      *) break ;;
+    esac
+    shift
+  done
+  local root; root="$(find_root)"
+  local wt="$root/worktree" name; name="$(basename "$root")"
+  local args=(--name "$name") mounts=("$wt")
+
+  # data/agent: the only subfolder of data/ visible to the agent, read-only
+  if [[ -d "$root/data/agent" ]]; then
+    mounts+=("$root/data/agent:ro")
+    local kc="$root/data/agent/kubeconfig"
+    if [[ -f "$kc" && -f "$wt/.harness/kit/spec.yaml" ]]; then
+      local host; host="$(k8s_host "$kc")"
+      grep -qF -- "- $host" "$wt/.harness/kit/spec.yaml" \
+        || die "the API server '$host' (data/agent/kubeconfig) is not in $wt/.harness/kit/spec.yaml, add '      - $host' under permissions.network.allow"
+    fi
+  fi
+
+  if [[ "$fresh" == 1 ]] && sbx ls 2>/dev/null | grep -qw "$name"; then
+    log "--fresh: removing sandbox '$name'"
+    sbx rm "$name"
+  fi
+
+  if sbx ls 2>/dev/null | grep -qw "$name"; then
+    # Image and kit are frozen at creation: sbx refuses --template/--kit on an existing sandbox.
+    log "reattaching to sandbox '$name' (original image/kit; --fresh to recreate)"
+  elif [[ "${HARNESS_PLAIN:-0}" == 1 ]]; then
+    log "HARNESS_PLAIN=1: default sbx image, no kit"
+  else
+    local repo="${HARNESS_IMAGE_REPO:-}" tag
+    tag="$(cat "$SCRIPT_DIR/image/TAG" 2>/dev/null || true)"
+    [[ -n "$repo" ]] || die "HARNESS_IMAGE_REPO not set (e.g. export HARNESS_IMAGE_REPO=docker.io/you/harness), or set HARNESS_PLAIN=1"
+    [[ -n "$tag"  ]] || die "$SCRIPT_DIR/image/TAG missing: run ./build.sh first"
+    args+=(--template "$repo:$flavor-$tag" --kit "$SCRIPT_DIR/kits/harness-$flavor")
+    if [[ -f "$wt/.harness/kit/spec.yaml" ]]; then
+      grep -q CHANGEME "$wt/.harness/kit/spec.yaml" && die "$wt/.harness/kit/spec.yaml still contains CHANGEME"
+      args+=(--kit "$wt/.harness/kit")
+      log "creating: image $repo:$flavor-$tag + kits harness-$flavor, project"
+    else
+      log "creating: image $repo:$flavor-$tag + kit harness-$flavor"
+    fi
+  fi
+  # Guardrail: the workspace is ALWAYS worktree/, never the parent (data/ would be mounted).
+  cd "$wt"
+  log "sandbox '$name', workspace $wt"
+  if [[ ${#args[@]} -gt 2 ]]; then
+    # Two-step creation: create, then post-create (inside the VM), then run (attach).
+    sbx create "${args[@]}" "$@" claude "${mounts[@]}"
+    post_create "$name" "$root"
+    exec sbx run --name "$name" claude
+  fi
+  exec sbx run "${args[@]}" "$@" claude "${mounts[@]}"
+}
+
+# In-VM settings applied right after creation (lost with `sbx rm`, hence replayed here).
+post_create() {
+  local name="$1" root="$2" agent="$2/data/agent"
+  [[ -d "$agent" ]] || return 0
+  # Loader: AGENT_DIR + .env + .env.session, re-read every session (agent and sbx exec).
+  local loader
+  loader="$(printf 'export AGENT_DIR=%q\n[ -r "$AGENT_DIR/.env" ] && . "$AGENT_DIR/.env"\n[ -r "$AGENT_DIR/.env.session" ] && . "$AGENT_DIR/.env.session"\n' "$agent")"
+  sbx exec "$name" -- sh -c "
+    printf '%s\n' '# harness: agent environment' \"\$1\" | sudo tee -a /etc/sandbox-persistent.sh >/dev/null 2>&1 \
+      || printf '%s\n' \"\$1\" >> ~/.profile
+    printf '%s\n' \"\$1\" >> ~/.bashrc
+    [ -f '$agent/kubeconfig' ] && mkdir -p ~/.kube && ln -sfn '$agent/kubeconfig' ~/.kube/config
+  " sh "$loader" && log "post-create: data/agent/.env loader installed"
+  # Optional project hook, executed inside the VM
+  if [[ -x "$root/worktree/.harness/post-create.sh" ]]; then
+    sbx exec "$name" -- sh "$root/worktree/.harness/post-create.sh" && log "post-create: .harness/post-create.sh"
+  fi
+}
+
+case "${1:-}" in
+  new)    shift; cmd_new "$@" ;;
+  add)    shift; cmd_add "$@" ;;
+  policy) shift; cmd_policy "$@" ;;
+  repair) shift; cmd_repair "$@" ;;
+  run)    shift; cmd_run "$@" ;;
+  *)      sed -n '2,10p' "$0"; exit 1 ;;
+esac

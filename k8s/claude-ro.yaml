@@ -1,0 +1,100 @@
+# RBAC reference (optional): example read-only identity if you don't have an agent kubeconfig yet.
+# claude-ro: read-only identity for Claude Code in sbx.
+#   kubectl apply -f claude-ro.yaml
+# What `view` already grants: pods, logs, deployments, services, configmaps, events, etc.
+# What `view` deliberately refuses and we do NOT reopen: secrets, exec, attach.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harness
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: claude-ro
+  namespace: harness
+automountServiceAccountToken: false
+---
+# view on the whole cluster
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: claude-ro-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: claude-ro
+    namespace: harness
+---
+# What `view` does not include: cluster-scoped objects and CRDs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: claude-ro-extras
+rules:
+  - apiGroups: [""]
+    resources: [nodes, namespaces, persistentvolumes]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io, networking.k8s.io, apiextensions.k8s.io, policy]
+    resources: ["*"]
+    verbs: [get, list, watch]
+  - apiGroups: [metrics.k8s.io]                     # kubectl top
+    resources: [pods, nodes]
+    verbs: [get, list]
+  - apiGroups: [cilium.io]                          # cilium status / policy, hubble
+    resources: ["*"]
+    verbs: [get, list, watch]
+  - apiGroups:                                      # flux get ...
+      - source.toolkit.fluxcd.io
+      - kustomize.toolkit.fluxcd.io
+      - helm.toolkit.fluxcd.io
+      - notification.toolkit.fluxcd.io
+      - image.toolkit.fluxcd.io
+    resources: ["*"]
+    verbs: [get, list, watch]
+  - apiGroups: [argoproj.io]                        # argocd app get (via CRDs)
+    resources: ["*"]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: claude-ro-extras
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: claude-ro-extras
+subjects:
+  - kind: ServiceAccount
+    name: claude-ro
+    namespace: harness
+---
+# port-forward only in kube-system, for `cilium hubble port-forward` to hubble-relay.
+# Remove if Relay is exposed through a Service/ingress with mTLS.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claude-ro-hubble-portforward
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: [pods/portforward, services/portforward]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claude-ro-hubble-portforward
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claude-ro-hubble-portforward
+subjects:
+  - kind: ServiceAccount
+    name: claude-ro
+    namespace: harness

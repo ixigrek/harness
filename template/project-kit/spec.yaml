@@ -1,0 +1,17 @@
+schemaVersion: "2"
+kind: mixin
+name: project
+displayName: Harness (project)
+description: Network hosts specific to THIS project. Stacked on harness-infra by `harness run`. Frozen at creation (--fresh to change).
+
+requires:
+  agent: claude
+
+permissions:
+  network:
+    allow:
+      # Cluster API server (derived from data/agent/kubeconfig by `harness new --infra`)
+      - @@K8S_HOST@@
+      # - argocd.lan
+      # - hubble.lan
+# Environment variables live in data/agent/.env (re-read every session), not here.
