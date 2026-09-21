@@ -9,6 +9,7 @@
 #   harness policy                    adds the Go pilot's network hosts to the sbx policy
 #   harness run [--infra|--dev] [--fresh]   launches Claude Code in sbx, workspace = worktree/
 #                                        flavor inferred from the project (infra if data/agent or .harness/kit exists); --fresh: recreates
+#   harness cost [--days N] [--by session]  token usage + API-equivalent USD of the project's sessions (cost.py, run in the VM)
 #
 # Step 1 only: no credentials, no infra tools. That comes later (sbx kit).
 
@@ -260,6 +261,13 @@ cmd_run() {
   exec sbx run "${args[@]}" "$@" claude "${mounts[@]}"
 }
 
+# Session logs live in a VM volume (~/.claude/projects), wiped by `sbx rm`: run this before --fresh.
+cmd_cost() {
+  local root; root="$(find_root)"; local name; name="$(basename "$root")"
+  sbx ls 2>/dev/null | grep -qw "$name" || die "no sandbox '$name' (harness run first)"
+  sbx exec "$name" -- python3 -c "$(cat "$SCRIPT_DIR/cost.py")" "$@"
+}
+
 # In-VM settings applied right after creation (lost with `sbx rm`, hence replayed here).
 post_create() {
   local name="$1" root="$2" agent="$2/data/agent"
@@ -286,5 +294,6 @@ case "${1:-}" in
   policy) shift; cmd_policy "$@" ;;
   repair) shift; cmd_repair "$@" ;;
   run)    shift; cmd_run "$@" ;;
-  *)      sed -n '2,11p' "$0"; exit 1 ;;
+  cost)   shift; cmd_cost "$@" ;;
+  *)      sed -n '2,12p' "$0"; exit 1 ;;
 esac
