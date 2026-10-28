@@ -33,6 +33,7 @@ harness md [--purpose S] [--cluster S] [--tools "a b"]                        # 
 HARNESS_IMAGE_REPO=docker.io/<user>/harness harness build [tag]               # this project's image from its tools, via build.sh
 PUSH=0 harness build                                                          # local --load instead of --push
 harness add <branch> [dir]                                                    # new worktree under worktree/
+harness kubeconfig <file>                                                     # data/agent/kubeconfig reduced to KUBE_CONTEXTS
 harness repair                                                                # re-relativise worktree paths
 harness policy                                                                # sbx policy allow for every tool's hosts + Claude
 harness run [--fresh]                                                         # harness md, then create/reattach sandbox, workspace = worktree/
@@ -92,6 +93,19 @@ this. Git identity is set at repo level because the VM does not inherit `~/.gitc
   or omits that host.
 - Image and kits are frozen when the sandbox is created. `--fresh` removes and recreates it.
 
+### Agents, skills and managed policy (step 7)
+
+- `template/agents/*.md` and `template/skills/*/SKILL.md` are copied as is into `worktree/.claude/` by
+  every `harness md` (harness-owned names are overwritten, other files kept). The model per subagent
+  is in its frontmatter; the main loop is `opusplan` from `template/settings.json`.
+- `image/policy/` is baked by `Dockerfile.tail` into `/etc/claude-code/managed-settings.json` and
+  `/opt/harness/hooks/`: a PreToolUse guard on Bash and a SessionStart hook. Managed settings win
+  over the project's and sit outside the workspace. Test the guard without sbx:
+  `jq -cn --arg c 'git push' '{tool_input:{command:$c}}' | image/policy/guard-bash.sh; echo $?` (2 = blocked).
+- `KUBE_CONTEXTS` (descriptor) reaches the VM as `HARNESS_KUBE_CONTEXTS` (project kit env), read by
+  both hooks. `harness kubeconfig` (host, needs kubectl) reduces the agent kubeconfig to those
+  contexts; `k8s_hosts` puts every API server of it in the kit.
+
 ### Credential flow (step 3 of the roadmap)
 
 The security boundary is the credential, not Claude Code: every identity handed to the agent is
@@ -120,7 +134,7 @@ files and `getline`, keep it that way.
 ## Conventions specific to this repo
 
 - Keep `harness` a single file, `set -euo pipefail`, `die`/`log` helpers, one `cmd_*` per subcommand,
-  usage text in the header comment (the fallback `case` prints lines 2-15 of the file, so keep the
+  usage text in the header comment (the fallback `case` prints lines 2-17 of the file, so keep the
   usage block there).
 - Pin versions; never install anything at run time. Weekly image rebuild is the update path.
 - Comments and docs in English (fewer tokens). Shell must stay portable to the VM's `sh` where it is

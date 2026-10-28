@@ -20,7 +20,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 NAME="${1:?usage: TOOLS=\"...\" ./build.sh <image-name> [tag]}"
 TAG="${2:-$(date +%Y.%m.%d)}"
 TOOLS="${TOOLS:-}"
-PLATFORM="${PLATFORM:-linux/arm64}"       # Apple Silicon means an arm64 VM; add linux/amd64 if needed
+# The sbx VM runs the host's architecture: arm64 on Apple Silicon, amd64 on most Linux boxes.
+case "$(uname -m)" in arm64|aarch64) _arch=arm64 ;; *) _arch=amd64 ;; esac
+PLATFORM="${PLATFORM:-linux/$_arch}"
 PUSH="${PUSH:-1}"
 DRY="${DRY:-0}"
 

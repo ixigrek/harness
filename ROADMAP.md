@@ -1,6 +1,6 @@
 # Claude Code harness: roadmap
 
-Last updated: 2026-09-21
+Last updated: 2026-10-28
 
 Goal: run Claude Code in a Docker sandbox (sbx) on `worktree/`, with no access to `data/`,
 with read-only infra tools, and with token consumption under control.
@@ -118,6 +118,19 @@ Reminder: Headroom sets `ANTHROPIC_BASE_URL`, so the context is handled as 200k,
   - `harness build` assembles `image/Dockerfile.base` + the project's fragments + `image/Dockerfile.tail` into `<repo>:<project>-<tag>` (`build.sh`, `DRY=1` to print it). `run` uses that image with kits `harness-base` + project; warns when the detected tools differ from the image's. `--dev/--infra`, the flavor inference, `harness kit`, `kits/harness-dev`, `kits/harness-infra`, `template/CLAUDE.infra.md`, `image/TAG` are gone
   - Existing projects: `harness md` (asks the questions once), `harness build`, `harness run --fresh`. To do on `talos`
 - [ ] Weekly image rebuild: `check-versions.py`, then `harness build` in every project, then `harness run --fresh`. One image per project now; shared layers as long as the tool order is the same
+
+---
+
+## Step 7. Autonomy and Linux host [~] (2026-10-28)
+
+- [x] Linux host: `build.sh` builds for the host's architecture (`uname -m`), so amd64 on a Linux box. sbx on Debian: static tarball `DockerSandboxes-linux-amd64.tar.gz` from `docker/sbx-releases` + its `install.sh` (the `docker-sbx` apt package only exists for Ubuntu)
+- [x] Subagents in `template/agents/`, copied into `worktree/.claude/agents/` by `harness md`: `explorer` (haiku), `implementer` (sonnet, disjoint files), `verifier` (haiku), `reviewer` (opus). Few on purpose: delegation only for context bloat, parallel chunks and black-box checks
+- [x] `long-task` skill (`template/skills/`): plan + progress in `docs/tasks/<slug>/`, committed per milestone, resumed by the session-start hook
+- [x] `model: opusplan` in `template/settings.json`: Opus in plan mode, Sonnet for execution (replaces "`/model opus` by hand for planning")
+- [x] Managed policy in the image (`image/policy/` -> `/etc/claude-code/managed-settings.json`): PreToolUse guard (git push/remote, kube mutations, contexts outside `KUBE_CONTEXTS`, `--kubeconfig` overrides, `rm -rf /`) and a SessionStart hook listing open long tasks. Not editable by the agent; still not a boundary (the credentials are)
+- [x] `KUBE_CONTEXTS` in `project.env` (`--contexts`), exported to the VM as `HARNESS_KUBE_CONTEXTS` through the project kit; `harness kubeconfig <file>` writes `data/agent/kubeconfig` with only those contexts; the kit allows every API server of that file
+- [ ] First run on the Linux box: `harness build`, `harness run --fresh`, check in the TUI that the guard blocks `git push` and that `/agents` lists the four subagents
+- [ ] `check-versions.py` checks the arm64 asset names only; add the amd64 ones if a tool ever ships them differently
 
 ---
 

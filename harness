@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # harness: lays out a project's "harness" tree and launches Claude Code in sbx.
 #
-#   harness new <name> [url] [--purpose S] [--cluster S] [--tools "a b"]
+#   harness new <name> [url] [--purpose S] [--cluster S] [--tools "a b"] [--contexts "a b"]
 #                                     creates <PROJECTS_ROOT>/<name>/{data,worktree/{.bare,main,shared,.claude,.harness,CLAUDE.md}}
 #                                     asks purpose, tools, cluster on a tty when the flag is absent; languages are detected in main/
 #   harness add <branch> [dir]        adds a worktree (from anywhere under the project)
@@ -10,6 +10,7 @@
 #   harness build [tag]               builds this project's image from its tools (build.sh); then `harness run --fresh`
 #   harness run [--fresh]             runs `harness md`, then launches Claude Code in sbx, workspace = worktree/; --fresh: recreates
 #   harness cost [--days N] [--by session]  token usage + API-equivalent USD of the project's sessions (cost.py, run in the VM)
+#   harness kubeconfig <file>         writes data/agent/kubeconfig with only the KUBE_CONTEXTS of project.env
 #   harness repair                    resets worktree paths to relative (host <-> VM)
 #   harness policy                    adds every tool's network hosts to the sbx policy
 #
@@ -52,11 +53,10 @@ link_claude() {
   ln -sfn ../.claude "$wt_dir/.claude"
 }
 
-# API server host as the sbx proxy sees it (no scheme, no port)
-k8s_host() {
-  local kc="$1" srv
-  srv="$(awk '/^ *server:/{print $2; exit}' "$kc" 2>/dev/null)"
-  srv="${srv#https://}"; srv="${srv#http://}"; printf '%s' "${srv%%/*}" | sed 's/:[0-9]*$//'
+# API server hosts as the sbx proxy sees them (no scheme, no port), one per line
+k8s_hosts() {
+  awk '/^ *server:/{print $2}' "$1" 2>/dev/null \
+    | sed -e 's#^https*://##' -e 's#/.*##' -e 's/:[0-9]*$//' | sort -u
 }
 
 # ---------------------------------------------------------------- tools --
@@ -104,7 +104,7 @@ detect_tools() {
 read_project() {
   local wt="$1/worktree"
   [[ -f "$wt/.harness/project.env" ]] || die "no $wt/.harness/project.env: run 'harness md' first"
-  PURPOSE="" CLUSTER="" TOOLS=""
+  PURPOSE="" CLUSTER="" TOOLS="" KUBE_CONTEXTS=""
   # shellcheck disable=SC1091
   . "$wt/.harness/project.env"
   check_tools $TOOLS
@@ -115,7 +115,7 @@ read_project() {
 interview() {
   local root="$1" wt="$1/worktree" name; name="$(basename "$root")"
   local detected; detected="$(order_tools $(detect_tools "$wt/main" "${OPT_TOOLS-}"))"
-  local purpose="${OPT_PURPOSE-}" cluster="${OPT_CLUSTER-}" tools="${OPT_TOOLS-}" tty=0
+  local purpose="${OPT_PURPOSE-}" cluster="${OPT_CLUSTER-}" tools="${OPT_TOOLS-}" contexts="${OPT_CONTEXTS-}" tty=0
   [[ -t 0 ]] && tty=1
   if [[ -z "${OPT_PURPOSE+x}" && "$tty" == 1 ]]; then
     read -r -p "> purpose of $name (one line): " purpose
@@ -135,6 +135,9 @@ interview() {
   if [[ -z "${OPT_CLUSTER+x}" && "$tty" == 1 && " $tools " == *" kubectl "* ]]; then
     read -r -p "> cluster context (empty if none): " cluster
   fi
+  if [[ -z "${OPT_CONTEXTS+x}" && "$tty" == 1 && " $tools " == *" kubectl "* ]]; then
+    read -r -p "> kube contexts the agent may use (space-separated): " contexts
+  fi
 
   mkdir -p "$wt/.harness"
   local line
@@ -142,6 +145,7 @@ interview() {
     line="${line//@@PURPOSE@@/${purpose//\"/\\\"}}"
     line="${line//@@CLUSTER@@/${cluster//\"/\\\"}}"
     line="${line//@@TOOLS@@/$tools}"
+    line="${line//@@CONTEXTS@@/$contexts}"
     printf '%s\n' "$line"
   done < "$TEMPLATE_DIR/project.env" > "$wt/.harness/project.env"
   grep -qxF '.harness' "$wt/.bare/info/exclude" 2>/dev/null || printf '.harness\n' >> "$wt/.bare/info/exclude"
@@ -201,11 +205,24 @@ render_project() {
     1' "$TEMPLATE_DIR/settings.json" > "$wt/.claude/settings.json"
   if command -v jq >/dev/null; then jq -e . "$wt/.claude/settings.json" >/dev/null || die "generated settings.json is not valid JSON"; fi
 
+  # --- subagents and skills: copied as is (harness-owned names are overwritten, others kept)
+  local d f
+  for d in agents skills; do
+    while IFS= read -r f; do
+      mkdir -p "$wt/.claude/$d/$(dirname "$f")"
+      cp "$TEMPLATE_DIR/$d/$f" "$wt/.claude/$d/$f"
+    done < <(cd "$TEMPLATE_DIR/$d" && find . -type f | sed 's#^\./##')
+  done
+
   # --- project kit: tool hosts + .harness/hosts + API server, tool env
   {
     if [[ " $EFFECTIVE " == *" kubectl "* ]]; then
-      h=CHANGEME.api-server; [[ -f "$root/data/agent/kubeconfig" ]] && h="$(k8s_host "$root/data/agent/kubeconfig")"
-      printf '      # Cluster API server (from data/agent/kubeconfig)\n      - %s\n' "$h"
+      printf '      # Cluster API servers (from data/agent/kubeconfig)\n'
+      if [[ -f "$root/data/agent/kubeconfig" ]]; then
+        k8s_hosts "$root/data/agent/kubeconfig" | sed 's/^/      - /'
+      else
+        printf '      - CHANGEME.api-server\n'
+      fi
     fi
     for t in $EFFECTIVE; do
       while IFS= read -r h; do [[ "$h" == *'*'* ]] && h="\"$h\""; printf '      - %s\n' "$h"; done < <(frag "$t" hosts)
@@ -215,9 +232,13 @@ render_project() {
     fi
   } > "$hosts"
   [[ -s "$hosts" ]] || printf '      []\n' > "$hosts"
-  for t in $EFFECTIVE; do
-    while IFS= read -r l; do printf '    %s\n' "$l"; done < <(frag "$t" env)
-  done > "$env"
+  {
+    for t in $EFFECTIVE; do
+      while IFS= read -r l; do printf '    %s\n' "$l"; done < <(frag "$t" env)
+    done
+    # Read by the guard hook and the session-start hook (image/policy)
+    [[ -n "$KUBE_CONTEXTS" ]] && printf '    HARNESS_KUBE_CONTEXTS: "%s"\n' "$KUBE_CONTEXTS"
+  } > "$env"
   [[ -s "$env" ]] && { printf 'environment:\n  variables:\n' | cat - "$env" > "$env.h" && mv "$env.h" "$env"; }
   mkdir -p "$wt/.harness/kit"
   awk -v hf="$hosts" -v ef="$env" '
@@ -241,11 +262,12 @@ cmd_new() {
       --purpose) OPT_PURPOSE="${2-}"; shift 2 ;;
       --cluster) OPT_CLUSTER="${2-}"; shift 2 ;;
       --tools)   OPT_TOOLS="${2-}";   shift 2 ;;
+      --contexts) OPT_CONTEXTS="${2-}"; shift 2 ;;
       --*) die "unknown option $1" ;;
       *) if [[ -z "$name" ]]; then name="$1"; else remote="$1"; fi; shift ;;
     esac
   done
-  [[ -n "$name" ]] || die "usage: harness new <name> [remote-url] [--purpose S] [--cluster S] [--tools \"a b\"]"
+  [[ -n "$name" ]] || die "usage: harness new <name> [remote-url] [--purpose S] [--cluster S] [--tools \"a b\"] [--contexts \"a b\"]"
   local root="$PROJECTS_ROOT/$name" wt="$PROJECTS_ROOT/$name/worktree"
   [[ -e "$root" ]] && die "$root already exists"
   need_git_248
@@ -332,7 +354,8 @@ cmd_md() {
       --purpose) OPT_PURPOSE="${2-}"; shift 2 ;;
       --cluster) OPT_CLUSTER="${2-}"; shift 2 ;;
       --tools)   OPT_TOOLS="${2-}";   shift 2 ;;
-      *) die "usage: harness md [--purpose S] [--cluster S] [--tools \"a b\"]" ;;
+      --contexts) OPT_CONTEXTS="${2-}"; shift 2 ;;
+      *) die "usage: harness md [--purpose S] [--cluster S] [--tools \"a b\"] [--contexts \"a b\"]" ;;
     esac
   done
   local root; root="$(find_root)"
@@ -352,6 +375,29 @@ cmd_build() {
   log "image tag $tag recorded in .harness/image.tag; 'harness run --fresh' to use it"
 }
 
+# data/agent/kubeconfig = the given kubeconfig reduced to the KUBE_CONTEXTS of project.env.
+# The agent then cannot even name another context; the guard hook refuses any other --context.
+cmd_kubeconfig() {
+  local src="${1:-}"
+  [[ -f "$src" ]] || die "usage: harness kubeconfig <kubeconfig-file> (the read-only identity, see k8s/claude-ro.yaml)"
+  command -v kubectl >/dev/null || die "kubectl is needed on the host for this command"
+  local root; root="$(find_root)"; read_project "$root"
+  [[ -n "$KUBE_CONTEXTS" ]] || die "KUBE_CONTEXTS is empty in $root/worktree/.harness/project.env"
+  local agent="$root/data/agent" tmp c parts=() list
+  tmp="$(mktemp -d)"
+  for c in $KUBE_CONTEXTS; do
+    KUBECONFIG="$src" kubectl config view --raw --flatten --minify --context "$c" > "$tmp/$c" 2>/dev/null \
+      || { rm -rf "$tmp"; die "context '$c' not found in $src"; }
+    parts+=("$tmp/$c")
+  done
+  list="$(IFS=:; printf '%s' "${parts[*]}")"
+  mkdir -p "$agent"
+  ( umask 077; KUBECONFIG="$list" kubectl config view --raw --flatten > "$agent/kubeconfig" )
+  KUBECONFIG="$agent/kubeconfig" kubectl config use-context "${KUBE_CONTEXTS%% *}" >/dev/null
+  rm -rf "$tmp"
+  log "data/agent/kubeconfig: contexts $KUBE_CONTEXTS (current: ${KUBE_CONTEXTS%% *}); 'harness md' then 'harness run --fresh'"
+}
+
 cmd_repair() {
   local wt; wt="$(find_root)/worktree"
   git -C "$wt/.bare" config worktree.useRelativePaths true
@@ -363,7 +409,7 @@ cmd_repair() {
 }
 
 cmd_policy() {
-  command -v sbx >/dev/null || die "sbx not found (brew install docker/tap/sbx)"
+  command -v sbx >/dev/null || die "sbx not found (macOS: brew install docker/tap/sbx; Linux: curl -fsSL https://get.docker.com | sudo SBX=1 sh)"
   local t hosts=""
   while read -r t; do
     while IFS= read -r h; do [[ "$h" == *'*'* ]] || hosts+="$h,"; done < <(frag "$t" hosts)
@@ -376,7 +422,7 @@ cmd_policy() {
 }
 
 cmd_run() {
-  command -v sbx >/dev/null || die "sbx not found (brew install docker/tap/sbx)"
+  command -v sbx >/dev/null || die "sbx not found (macOS: brew install docker/tap/sbx; Linux: curl -fsSL https://get.docker.com | sudo SBX=1 sh)"
   local fresh=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -396,9 +442,11 @@ cmd_run() {
     mounts+=("$root/data/agent:ro")
     local kc="$root/data/agent/kubeconfig"
     if [[ -f "$kc" ]]; then
-      local host; host="$(k8s_host "$kc")"
-      grep -qF -- "- $host" "$wt/.harness/kit/spec.yaml" \
-        || die "the API server '$host' (data/agent/kubeconfig) is not in $wt/.harness/kit/spec.yaml (is kubectl in TOOLS?)"
+      local host
+      while IFS= read -r host; do
+        grep -qF -- "- $host" "$wt/.harness/kit/spec.yaml" \
+          || die "the API server '$host' (data/agent/kubeconfig) is not in $wt/.harness/kit/spec.yaml (is kubectl in TOOLS?)"
+      done < <(k8s_hosts "$kc")
     fi
   fi
 
@@ -469,7 +517,8 @@ case "${1:-}" in
   build)  shift; cmd_build "$@" ;;
   policy) shift; cmd_policy "$@" ;;
   repair) shift; cmd_repair "$@" ;;
+  kubeconfig) shift; cmd_kubeconfig "$@" ;;
   run)    shift; cmd_run "$@" ;;
   cost)   shift; cmd_cost "$@" ;;
-  *)      sed -n '2,15p' "$0"; exit 1 ;;
+  *)      sed -n '2,17p' "$0"; exit 1 ;;
 esac
