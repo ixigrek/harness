@@ -1,0 +1,7 @@
+Bash(kubectl get:*)
+Bash(kubectl describe:*)
+Bash(kubectl logs:*)
+Bash(kubectl explain:*)
+Bash(kubectl api-resources:*)
+Bash(kubectl version:*)
+Bash(kubectl kustomize:*)

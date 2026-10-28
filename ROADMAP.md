@@ -1,0 +1,154 @@
+# Claude Code harness: roadmap
+
+Last updated: 2026-10-28
+
+Goal: run Claude Code in a Docker sandbox (sbx) on `worktree/`, with no access to `data/`,
+with read-only infra tools, and with token consumption under control.
+
+Legend: [x] done, [~] in progress, [ ] to do, [?] to verify
+
+---
+
+## Step 1. Foundation: sbx + Claude Code + one project, no infra tools [x]
+
+- [x] Directory tree `data/` (outside the sandbox) and `worktree/{.bare, main, shared, .claude, CLAUDE.md}`
+- [x] `harness new`: bare repo, `main` worktree, `.git` pointer, `.claude` symlinked and excluded from git
+- [x] Relative worktree paths (`worktree.useRelativePaths`, needs git 2.48 or newer). Without this the worktrees break inside the VM
+- [x] Repo-level git identity (the VM does not inherit `~/.gitconfig`)
+- [x] Root `CLAUDE.md` (English, short) + `.claude/settings.json` (allow Go/git, deny push/remote/apt/sudo)
+- [x] Locked Down network policy, the "block, then allow-list" loop validated in the TUI
+- [x] Go pilot: endpoint + test + commit from inside the sandbox
+
+Decisions: `CLAUDE.md` in English (fewer tokens). `GOTOOLCHAIN=local`. `apt` and `sudo` forbidden to the agent, the image is immutable.
+
+---
+
+## Step 2. sbx kit: custom image + mixins [x]
+
+- [x] Multi-stage `image/Dockerfile`: `dev` (Go, Bun, Python) and `infra` (dev + kubectl, helm, cilium, hubble, argocd, flux, terraform, tofu, aws, gcloud, az, hcloud, scw, ovhcloud)
+- [x] Everything in `/usr/local/bin`, pinned versions, apt only at build time
+- [x] `az` via `uv` + a managed Python 3.12 (image ships 3.14, `--prerelease=allow` required)
+- [x] `build.sh` (buildx arm64, pushed to Docker Hub, writes `image/TAG`) and `check-versions.py` (bumps via GitHub)
+- [x] Mixin kits `harness-dev` and `harness-infra` (network + env), stacked on `--template`
+- [x] `harness run [--infra] [--fresh]`: create, then post-create, then run. Reattaches if the sandbox exists
+- [x] Validated: Go 1.25.1 / Bun 1.4.2 in `pilot`, 18 allow + 1 deny, infra image with all 14 tools
+
+Decisions: image via `--template` + `mixin` kits (rather than a `sandbox` kit inheriting from `claude`). `claude-code` base without dockerd. Two images so as not to ship 2 GB of cloud CLIs into a Go project. Weekly rebuild is the update mechanism, never apt inside the VM.
+
+Backlog: add `linux/amd64` if ever needed. Helm 3 vs 4 depending on the existing charts.
+
+---
+
+## Step 3. Read-only identities, one provider at a time [~]
+
+Principle: the boundary is the credential, not Claude Code. The `deny` entries in `settings.json` are ergonomics.
+
+Scope (decided 2026-09-21): only what runs today, i.e. the Talos cluster on Proxmox and what sits on
+top of it. Everything else is parked, not planned.
+
+### Kubernetes [x]
+- [x] `data/agent/`: the only subfolder of `data/` mounted in the VM, as `:ro`, at the same absolute path
+- [x] Agent kubeconfig provided by the user (SA `ai-agents:ai-reader`, `can-i create` answers no)
+- [x] Project kit `worktree/.harness/kit/spec.yaml`: API server host (derived from the kubeconfig)
+- [x] Talos cluster reachable on the LAN, TLS intact, RBAC effective from inside the VM
+- [x] `data/agent/.env` (POSIX sh, `$AGENT_DIR`) + `.env.session`; loader written by `post_create` into `/etc/sandbox-persistent.sh`, `~/.profile`, `~/.bashrc`; symlink `~/.kube/config`
+- [x] Loader sourced by the agent process (verified 2026-09-21 in `talos`: `$AGENT_DIR` set)
+- [x] `KUBECONFIG` empty in the same check: the sandbox had been created without `--infra`. `run` now infers the flavor from `.harness/kit/spec.yaml`; `--dev`/`--infra` override
+- [x] The LAN IP still had to be accepted in the TUI on a `--fresh` run (2026-09-21): `talos` has no `.harness/kit/spec.yaml` (laid out before the kit existed), its 27 allows come from `harness-infra` alone. Fix: `harness kit` (2026-09-21) writes the kit for an existing project
+- [x] In `talos`: `harness kit`, then `harness run --fresh`; the TUI no longer asks for the API server (2026-09-21)
+
+### In scope [ ]
+| Provider | Identity | Delivery | Status |
+|---|---|---|---|
+| ArgoCD | account/role `get` only | `sbx secret` (bearer) + host in project kit | to do, next provider; validates proxy injection |
+| Flux | nothing: goes through the kubeconfig | n/a | done de facto |
+| Cilium / Hubble | via kubeconfig (`cilium.io` CRDs, `kube-system` portforward) | `HUBBLE_SERVER` in `.env` | to test |
+| Terraform/OpenTofu | none | **no state in the VM** (decided): the agent writes HCL, `plan`/`apply` run on the host or in CI. Talos machine secrets live in the state and must never enter the sandbox | decided |
+
+Decisions: Proxmox gets no identity of its own (host-only concern; no CLI in the image anyway).
+Terraform state stays outside: redacted state and RO backend both rejected.
+
+### Parked (not in use, do not implement)
+Azure (`Reader` SP), Hetzner (read token), Scaleway (`AllProductsReadOnly`), AWS (`ViewOnlyAccess`),
+GCP (`roles/viewer`), OVH (`GET /*` keys). The delivery mechanisms are known (`.env`, `sbx secret`,
+`.env.session`); pick them up only when a project actually needs one.
+
+~~Backlog: the `infra` image ships `aws`, `gcloud`, `az`, `hcloud`, `scw`, `ovhcloud` for nothing.~~
+Solved by the per-project image (Step 6, 2026-09-21): a project only ships the tools in its descriptor.
+
+Out of scope (decided): the Grafana/Loki/Tempo stack. Logs are `data/` through another door.
+
+Closing test per provider: a read succeeds, a mutation fails with 403 **from inside** the sandbox.
+
+---
+
+## Step 4. Host launcher [dropped]
+
+Only existed for AWS/GCP 1h session tokens, which are parked. The mechanism (`.env.session` mounted
+`:ro`, loader) stays in place; a `harness env` generator is written only if such a provider returns.
+
+---
+
+## Step 5. Token cost, measured [ ] (priority: this is what hurts today)
+
+Order: the cheap win first, the measurement second, Headroom last and only if still needed.
+
+- [x] MCP inventory (2026-09-21, from inside a harness session):
+  - `mcp-gateway` (`~/.claude.json`, injected by sbx): 5 meta-tools (`mcp-find`, `mcp-add`, `mcp-exec`, `code-mode`, `mcp-config-set`), catalog empty. Harmless
+  - claude.ai connectors (account-level, not in any local config): Gmail 26 tools, Google Drive 11, Google Calendar 9, Claude Docs 8 + its instructions block. None needed in a sandbox
+  - Fix: `"disableClaudeAiConnectors": true` in `settings.json` (template + `worktree/.claude`). Existing projects: copy `template/settings.json` over their `worktree/.claude/settings.json`
+- [x] Measurement: `harness cost [--days N] [--by session]` (`cost.py` run in the VM via `sbx exec`). Sums per-turn `usage` from `~/.claude/projects/**/*.jsonl` (main sessions and subagents, streamed duplicates deduped by message id), per day and model, with API-equivalent USD. The log volume dies with `sbx rm`: run it before `--fresh`
+- [ ] Baseline: one week of sessions with `settings.json` at `model: claude-sonnet-5`, `effortLevel: high` (Claude Code default is `xhigh`); `/model opus` by hand for planning. Reference point, 2026-09-21 alone in the harness sandbox: 67 turns, 2.6M cache reads, 40k output, ~$7 API-equivalent, 92% of it on Fable
+- [ ] Headroom inside the VM (local proxy to api.anthropic.com through the sbx proxy); check that the path holds with Anthropic credential injection
+- [ ] One week with it, cost comparison
+- [ ] Keep only if the gain is clear; no stacking with rtk/caveman-proxy
+
+Reminder: Headroom sets `ANTHROPIC_BASE_URL`, so the context is handled as 200k, not 1M.
+
+---
+
+## Step 6. Generalisation [ ]
+
+- [ ] Document the harness (README) so it can be picked up again in six months. Before the migration: it is what makes the rest survive
+- [ ] Migrate the existing sandboxes (`claude-*`) to `harness new`; `my-bank-account` with a deterministic redaction script from `data/` to `shared/`
+- [x] Project descriptor + per-tool catalogue + per-project image (2026-09-21). Origin: on `talos`, Claude read the template's `## Go` section and concluded "talos is a Go tool whose Go side has not been written yet"
+  - `harness new` asks what cannot be inferred (purpose, tools, cluster; flags `--purpose/--tools/--cluster` for scripts) and writes `worktree/.harness/project.env`. Languages are detected in `main/` (`go.mod`, `package.json`, `pyproject.toml`, manifests, `*.tf`), never asked
+  - `tools/<name>/{Dockerfile,CLAUDE.md,allow,hosts,env}`: one directory per tool, order in `tools/ORDER`. Everything the harness knows about a tool lives there
+  - `harness md` renders `CLAUDE.md` (between `<!-- harness:begin/end -->` markers, hand-written text outside is kept), `.claude/settings.json` (allow-list per tool) and `.harness/kit/spec.yaml` (hosts + env per tool, API server from the kubeconfig, extras in `.harness/hosts`). `harness run` calls it every time, so an empty project picks up its language when a `go.mod` appears
+  - `harness build` assembles `image/Dockerfile.base` + the project's fragments + `image/Dockerfile.tail` into `<repo>:<project>-<tag>` (`build.sh`, `DRY=1` to print it). `run` uses that image with kits `harness-base` + project; warns when the detected tools differ from the image's. `--dev/--infra`, the flavor inference, `harness kit`, `kits/harness-dev`, `kits/harness-infra`, `template/CLAUDE.infra.md`, `image/TAG` are gone
+  - Existing projects: `harness md` (asks the questions once), `harness build`, `harness run --fresh`. To do on `talos`
+- [ ] Weekly image rebuild: `check-versions.py`, then `harness build` in every project, then `harness run --fresh`. One image per project now; shared layers as long as the tool order is the same
+
+---
+
+## Step 7. Autonomy and Linux host [~] (2026-10-28)
+
+- [x] Linux host: `build.sh` builds for the host's architecture (`uname -m`), so amd64 on a Linux box. sbx on Debian: static tarball `DockerSandboxes-linux-amd64.tar.gz` from `docker/sbx-releases` + its `install.sh` (the `docker-sbx` apt package only exists for Ubuntu)
+- [x] Subagents in `template/agents/`, copied into `worktree/.claude/agents/` by `harness md`: `explorer` (haiku), `implementer` (sonnet, disjoint files), `verifier` (haiku), `reviewer` (opus). Few on purpose: delegation only for context bloat, parallel chunks and black-box checks
+- [x] `long-task` skill (`template/skills/`): plan + progress in `docs/tasks/<slug>/`, committed per milestone, resumed by the session-start hook
+- [x] `model: opusplan` in `template/settings.json`: Opus in plan mode, Sonnet for execution (replaces "`/model opus` by hand for planning")
+- [x] Managed policy in the image (`image/policy/` -> `/etc/claude-code/managed-settings.json`): PreToolUse guard (git push/remote, kube mutations, contexts outside `KUBE_CONTEXTS`, `--kubeconfig` overrides, `rm -rf /`) and a SessionStart hook listing open long tasks. Not editable by the agent; still not a boundary (the credentials are)
+- [x] `KUBE_CONTEXTS` in `project.env` (`--contexts`), exported to the VM as `HARNESS_KUBE_CONTEXTS` through the project kit; `harness kubeconfig <file>` writes `data/agent/kubeconfig` with only those contexts; the kit allows every API server of that file
+- [ ] First run on the Linux box: `harness build`, `harness run --fresh`, check in the TUI that the guard blocks `git push` and that `/agents` lists the four subagents
+- [ ] `check-versions.py` checks the arm64 asset names only; add the amd64 ones if a tool ever ships them differently
+
+---
+
+## Order of work (decided 2026-09-21)
+
+1. ~~`talos`: `harness kit` + `harness run --fresh`~~ done 2026-09-21
+2. Step 5: ~~MCP inventory~~, then the baseline week (started 2026-09-21; `harness cost` at the end, before any `--fresh`)
+3. Step 3: ArgoCD read-only identity
+4. Step 5: Headroom trial, if the baseline still hurts
+5. Step 6: ~~descriptor + per-project image~~ (2026-09-21), README, then migration, then rebuild routine
+
+---
+
+## Open points / debt
+
+- [x] `sbx create` accepts the same syntax as `sbx run` (exercised by `talos --fresh`, 2026-09-21)
+- [?] Private IPs in the kits
+- `downloads.claude.ai` hit at boot despite `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` (probably sbx provisioning the agent). Benign
+- `azcliprod.blob.core.windows.net` blocked (`az` auto-update). Intended
+- The `deny` entries in `settings.json` can be bypassed via bash (demonstrated on `.bare/`). The sandbox and the credentials are what protect, not them
+- `mcp-gateway.docker.internal` heavily used: it is Claude Code polling the gateway, which exposes nothing (catalog empty, see Step 5). Benign

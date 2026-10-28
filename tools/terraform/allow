@@ -1,0 +1,4 @@
+Bash(terraform fmt:*)
+Bash(terraform validate:*)
+Bash(terraform providers:*)
+Bash(terraform version:*)

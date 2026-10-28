@@ -1,0 +1,5 @@
+Bash(uv sync:*)
+Bash(uv run:*)
+Bash(uv lock:*)
+Bash(uv pip list:*)
+Bash(ruff:*)

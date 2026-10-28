@@ -1,0 +1,19 @@
+
+# Telemetry / update checks off: nothing should try to phone home on its own
+ENV GOTOOLCHAIN=local \
+    GOFLAGS=-mod=mod \
+    CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true \
+    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true \
+    AZURE_CORE_COLLECT_TELEMETRY=false \
+    CHECKPOINT_DISABLE=1 \
+    HCLOUD_CLI_TELEMETRY=off \
+    SCW_DISABLE_CHECK_VERSION=true
+
+# Managed policy: guard hook + session-start hook. Takes precedence over the project's
+# settings.json and lives outside the workspace, so the agent cannot edit or disable it.
+COPY policy/managed-settings.json /etc/claude-code/managed-settings.json
+COPY policy/guard-bash.sh policy/session-start.sh /opt/harness/hooks/
+RUN chmod 0755 /opt/harness/hooks/*.sh
+
+USER agent
+WORKDIR /home/agent

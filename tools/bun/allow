@@ -1,0 +1,5 @@
+Bash(bun install:*)
+Bash(bun run:*)
+Bash(bun test:*)
+Bash(bun build:*)
+Bash(bunx:*)

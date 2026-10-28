@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+#
+# sbx harness image, base layer. `build.sh` appends one fragment per selected
+# tool (tools/<name>/Dockerfile) after this file, in the catalogue order, then
+# the tail (USER agent). One image per project: <repo>:<project>-<tag>.
+#
+# Rules:
+#   - every binary ends up in /usr/local/bin (sbx may override PATH)
+#   - versions as ARGs in the fragments, pinned; a renamed asset fails the build loudly
+#   - apt only here, at build time, never inside the sandbox
+#
+# To bump versions: ./check-versions.py
+
+ARG BASE=docker/sandbox-templates:claude-code
+FROM ${BASE}
+ARG TARGETARCH
+
+USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils jq \
+ && rm -rf /var/lib/apt/lists/*
+
+# Python: the base image's copy + uv (already present in the Docker templates) is enough.
+
+ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
